@@ -31,7 +31,7 @@ jobs:
           }
 
           # 1. 拉取主仓库（你的 fork）
-          fetch_at https://github.com/kenzok8/sing-box "$OUT/core" "$SING_BOX_COMMIT"
+          fetch_at https://github.com/Uevo001/sing-box "$OUT/core" "$SING_BOX_COMMIT"
           # 2. 合并上游官方仓库（例如 SagerNet/sing-box）
           git -C "$OUT/core" fetch --no-tags https://github.com/SagerNet/sing-box "$UPSTREAM_COMMIT"
           git -C "$OUT/core" -c user.email=ci@local -c user.name=ci merge --no-edit "$UPSTREAM_COMMIT"
