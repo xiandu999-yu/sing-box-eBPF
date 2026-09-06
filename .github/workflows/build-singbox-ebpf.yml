@@ -7,14 +7,13 @@ permissions:
   contents: write
 
 env:
-  # 从 pins.env 读取的变量会在后续步骤中加载
   GO_VERSION: "1.26.0"
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout this repo (for pins.env and scripts)
+      - name: Checkout this repo (for pins.env)
         uses: actions/checkout@v6
 
       - name: Load pins
@@ -34,30 +33,35 @@ jobs:
           git clone --filter=blob:none --no-checkout https://github.com/reF1nd/sing-box repo
           git -C repo checkout "$SING_BOX_COMMIT"
 
+          # 初始化子模块（如果有）
+          git -C repo submodule update --init --recursive || true
+
+          # 下载依赖
+          (cd repo && go mod download)
+
           # 定义构建函数
           build_arch() {
             local arch=$1
-            local output="dist/sing-box-${SING_BOX_VERSION}-linux-${arch}"
-            local tags="with_ebpf,with_musl"   # 可根据需要调整
+            local output="../dist/sing-box-${SING_BOX_VERSION}-linux-${arch}"
+            local tags="with_ebpf"
             local ldflags="-X 'github.com/sagernet/sing-box/constant.Version=$SING_BOX_VERSION' -s -w -buildid="
 
-            CGO_ENABLED=1 GOOS=linux GOARCH="$arch" \
+            (cd repo && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
               go build -v -trimpath -o "$output" \
               -tags "$tags" \
               -ldflags "$ldflags" \
-              repo/cmd/sing-box
+              ./cmd/sing-box)
 
             # 打包压缩
             tar -czf "${output}.tar.gz" -C dist "$(basename "$output")"
             rm "$output"
           }
 
-          # 只构建支持 eBPF 的架构
+          # 构建支持的架构
           build_arch amd64
           build_arch arm64
-
-          # 可选：也构建 armv7（如果 eBPF 在 armv7 上受支持）
-          # build_arch arm (需要设置 GOARM=7)
+          # 若需要 armv7，可添加（但需确认 eBPF 支持）
+          # GOARM=7 build_arch arm
 
       - name: Upload to release (sing-box-ebpf)
         env:
@@ -75,7 +79,7 @@ jobs:
             gh release upload sing-box-ebpf "$file" --repo "${{ github.repository }}" --clobber
           done
 
-          # 只保留最近 3 个 assets（可选）
+          # 只保留最近 3 个 assets
           gh release view sing-box-ebpf --repo "${{ github.repository }}" --json assets \
             --jq '.assets | sort_by(.createdAt) | reverse | .[3:] | .[].name' \
             | while read -r old; do
