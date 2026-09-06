@@ -33,15 +33,21 @@ jobs:
           # 1. 拉取主仓库（你的 fork）
           fetch_at https://github.com/reF1nd/sing-box "$OUT/core" "$SING_BOX_COMMIT"
 
-          # 2. 合并上游官方仓库，并强制丢弃 docs 目录下的所有本地改动
+          # 2. 获取上游 commit
           git -C "$OUT/core" fetch --no-tags https://github.com/SagerNet/sing-box "$UPSTREAM_COMMIT"
-          
-          # --- 新增：用上游 docs 覆盖本地 docs，消除文档冲突 ---
-          git -C "$OUT/core" checkout FETCH_HEAD -- docs/
-          git -C "$OUT/core" add docs/
-          # -------------------------------------------------
 
-          # 现在执行合并，docs 目录不会再产生冲突
+          # --- 解决 docs 目录冲突：用上游 docs 替换本地 docs，并提交 ---
+          # 删除可能存在的本地 docs，避免未跟踪文件干扰
+          rm -rf "$OUT/core/docs" || true
+          # 从上游检出 docs 目录
+          git -C "$OUT/core" checkout FETCH_HEAD -- docs/
+          # 添加并提交（确保工作区干净）
+          git -C "$OUT/core" add docs/
+          git -C "$OUT/core" -c user.email=ci@local -c user.name=ci \
+              commit -m "chore: use upstream docs (temporary)"
+          # ---------------------------------------------------------
+
+          # 现在执行合并，docs 已一致，不会冲突
           git -C "$OUT/core" -c user.email=ci@local -c user.name=ci merge --no-edit "$UPSTREAM_COMMIT"
 
           # 如果有子模块，初始化
@@ -65,7 +71,7 @@ jobs:
           # 6. 若存在 PGO 文件，复制
           # cp "$GITHUB_WORKSPACE/ci/default.pgo" "$OUT/core/default.pgo"
 
-          # 7. 移除所有 .git 目录
+          # 7. 移除所有 .git 目录（包括临时提交的历史）
           find "$OUT" -name .git -type d -prune -exec rm -rf {} +
 
           # 8. 生成带哈希的 tarball
