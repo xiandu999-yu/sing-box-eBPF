@@ -1,0 +1,113 @@
+name: Assemble sing-box source
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Load pins
+        run: cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.0"   # 根据 sing-box 实际需要调整
+
+      - name: Assemble source tree
+        run: |
+          set -eux
+          OUT="sing-box-${SING_BOX_VERSION}"
+          rm -rf "$OUT"; mkdir -p "$OUT"
+
+          fetch_at() {
+            git clone --filter=blob:none --no-checkout "$1" "$2"
+            git -C "$2" checkout "$3"
+          }
+
+          # 1. 拉取主仓库（你的 fork）
+          fetch_at https://github.com/kenzok8/sing-box "$OUT/core" "$SING_BOX_COMMIT"
+          # 2. 合并上游官方仓库（例如 SagerNet/sing-box）
+          git -C "$OUT/core" fetch --no-tags https://github.com/SagerNet/sing-box "$UPSTREAM_COMMIT"
+          git -C "$OUT/core" -c user.email=ci@local -c user.name=ci merge --no-edit "$UPSTREAM_COMMIT"
+          # 如果有子模块，初始化
+          ( cd "$OUT/core" && git submodule update --init )
+
+          # 3. （可选）处理其他依赖库，如 v2ray-core、shadowsocks 等
+          # 示例：若需要处理依赖库 lib
+          # fetch_at https://github.com/kenzok8/some-lib "$OUT/lib" "$LIB_COMMIT"
+          # if ls "$GITHUB_WORKSPACE"/ci/patches/lib/*.patch >/dev/null 2>&1; then
+          #   git -C "$OUT/lib" apply "$GITHUB_WORKSPACE"/ci/patches/lib/*.patch
+          # fi
+
+          # 4. 应用主仓库补丁（如果有）
+          if ls "$GITHUB_WORKSPACE"/ci/patches/sing-box/*.patch >/dev/null 2>&1; then
+            git -C "$OUT/core" -c user.name=ci -c user.email=ci@local \
+                am "$GITHUB_WORKSPACE"/ci/patches/sing-box/*.patch
+          fi
+
+          # 5. 若需要替换依赖为本地路径（类似原 dae 的 go mod edit）
+          # 例如替换某个库为本地目录
+          # ( cd "$OUT/core" \
+          #     && go mod edit -replace github.com/some/dependency=../lib \
+          #     && go mod tidy )
+
+          # 6. 若存在 PGO 文件，复制
+          # cp "$GITHUB_WORKSPACE/ci/default.pgo" "$OUT/core/default.pgo"  # 按需
+
+          # 7. 移除所有 .git 目录
+          find "$OUT" -name .git -type d -prune -exec rm -rf {} +
+
+          # 8. 生成带哈希的 tarball
+          tar --numeric-owner --owner=0 --group=0 --sort=name -czf src.tmp.tar.gz "$OUT"
+          SRC_ID=$(sha256sum src.tmp.tar.gz | cut -c1-12)
+          TARBALL="sing-box-src-${SING_BOX_VERSION}-${SRC_ID}.tar.gz"
+          mv src.tmp.tar.gz "$TARBALL"
+          echo "PKG_HASH=$(sha256sum "$TARBALL" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+
+      - name: Publish to sing-box-src release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view sing-box-src --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create sing-box-src --repo "${{ github.repository }}" \
+              --title "sing-box pinned source" --notes "Auto-assembled sing-box source tarballs (newest 3 kept)." --latest=false
+          gh release upload sing-box-src "$TARBALL" --repo "${{ github.repository }}" --clobber
+          # 只保留最新 3 个 assets
+          gh release view sing-box-src --repo "${{ github.repository }}" --json assets \
+            --jq '.assets | sort_by(.createdAt) | reverse | .[3:] | .[].name' \
+            | while read -r old; do
+                [ -n "$old" ] && gh release delete-asset sing-box-src "$old" --repo "${{ github.repository }}" -y
+              done
+
+      - name: Write PKG_HASH into Makefile and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          cur_ver=$(sed -n 's/^PKG_VERSION:=//p' sing-box/Makefile)
+          cur_rel=$(sed -n 's/^PKG_RELEASE:=//p' sing-box/Makefile)
+          if [ "$cur_ver" = "${SING_BOX_VERSION}" ] && grep -qx "PKG_SOURCE:=${TARBALL}" sing-box/Makefile; then
+            echo "no change"; exit 0
+          fi
+          if [ "$cur_ver" = "${SING_BOX_VERSION}" ]; then
+            rel=$((cur_rel + 1))
+          else
+            rel=1
+          fi
+          sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=${SING_BOX_VERSION}/" sing-box/Makefile
+          sed -i "s/^PKG_RELEASE:=.*/PKG_RELEASE:=${rel}/" sing-box/Makefile
+          sed -i "s|^PKG_SOURCE:=.*|PKG_SOURCE:=${TARBALL}|" sing-box/Makefile
+          sed -i "s/^PKG_HASH:=.*/PKG_HASH:=${PKG_HASH}/" sing-box/Makefile
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sing-box/Makefile
+          git diff --cached --quiet && { echo "no change"; exit 0; }
+          git commit -m "chore(sing-box): assemble pinned source ${SING_BOX_VERSION}-${rel}"
+          git push origin "HEAD:${{ github.ref_name }}"
