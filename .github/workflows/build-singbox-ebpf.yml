@@ -15,7 +15,7 @@ on:
           - Linux
           - publish-android
       test_message:
-        description: "TestFlight test message"   # 保留兼容
+        description: "TestFlight test message"
         required: false
         type: string
   push:
@@ -289,7 +289,7 @@ jobs:
           set -xeuo pipefail
           sudo gem install fpm
           sudo apt-get install -y debsigs
-          cp .fpm_systemd .fpm
+          cp repo/.fpm_systemd .fpm
           fpm -t deb \
             -v "$PKG_VERSION" \
             -p "dist/sing-box_${{ env.SING_BOX_VERSION }}_linux_${{ matrix.debian }}.deb" \
@@ -307,7 +307,7 @@ jobs:
           set -xeuo pipefail
           sudo gem install fpm
           echo '%_rpmformat 4' > "$HOME/.rpmmacros"
-          cp .fpm_systemd .fpm
+          cp repo/.fpm_systemd .fpm
           fpm -t rpm \
             -v "$PKG_VERSION" \
             -p "dist/sing-box_${{ env.SING_BOX_VERSION }}_linux_${{ matrix.rpm }}.rpm" \
@@ -329,7 +329,7 @@ jobs:
           sudo gem install fpm
           sudo apt-get update || true
           sudo apt-get install -y libarchive-tools
-          cp .fpm_pacman .fpm
+          cp repo/.fpm_pacman .fpm
           fpm -t pacman \
             -v "$PKG_VERSION" \
             -p "dist/sing-box_${{ env.SING_BOX_VERSION }}_linux_${{ matrix.pacman }}.pkg.tar.zst" \
@@ -341,14 +341,14 @@ jobs:
         run: |
           set -xeuo pipefail
           sudo gem install fpm
-          cp .fpm_openwrt .fpm
+          cp repo/.fpm_openwrt .fpm
           fpm -t deb \
             -v "$PKG_VERSION" \
             -p "dist/openwrt.deb" \
             --architecture all \
             dist/sing-box=/usr/bin/sing-box
           for architecture in ${{ matrix.openwrt }}; do
-            .github/deb2ipk.sh "$architecture" "dist/openwrt.deb" "dist/sing-box_${{ env.SING_BOX_VERSION }}_openwrt_${architecture}.ipk"
+            repo/.github/deb2ipk.sh "$architecture" "dist/openwrt.deb" "dist/sing-box_${{ env.SING_BOX_VERSION }}_openwrt_${architecture}.ipk"
           done
           rm "dist/openwrt.deb"
 
@@ -362,7 +362,7 @@ jobs:
         run: |
           set -xeuo pipefail
           for architecture in ${{ matrix.openwrt }}; do
-            .github/build_openwrt_apk.sh \
+            repo/.github/build_openwrt_apk.sh \
               "$architecture" \
               "${{ env.SING_BOX_VERSION }}" \
               "dist/sing-box" \
@@ -373,7 +373,7 @@ jobs:
         if: matrix.alpine != ''
         run: |
           set -xeuo pipefail
-          .github/build_alpine_apk.sh \
+          repo/.github/build_alpine_apk.sh \
             "${{ matrix.alpine }}" \
             "${{ env.SING_BOX_VERSION }}" \
             "dist/sing-box" \
@@ -384,7 +384,6 @@ jobs:
           set -xeuo pipefail
           cd dist
           mkdir -p "${DIR_NAME}"
-          # 从外部仓库复制 LICENSE
           cp ../repo/LICENSE "${DIR_NAME}"
           cp sing-box "${DIR_NAME}"
           if [ -f libcronet.so ]; then
