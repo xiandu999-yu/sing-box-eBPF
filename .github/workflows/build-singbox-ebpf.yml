@@ -649,10 +649,13 @@ jobs:
         with:
           cache-provider: basic
 
+      # ========== 修复版本更新步骤 ==========
       - name: Update version (for dispatch)
         if: github.event_name == 'workflow_dispatch'
         run: |
           cd repo
+          git -C clients/android config user.email "actions@github.com"
+          git -C clients/android config user.name "GitHub Actions"
           go run -v ./cmd/internal/update_android_version --ci || true
           git -C clients/android add version.properties
           git -C clients/android commit -m "Update version" --allow-empty
@@ -661,6 +664,8 @@ jobs:
         if: github.event_name != 'workflow_dispatch'
         run: |
           cd repo
+          git -C clients/android config user.email "actions@github.com"
+          git -C clients/android config user.name "GitHub Actions"
           go run -v ./cmd/internal/update_android_version --ci --nightly || true
           git -C clients/android add version.properties
           git -C clients/android commit -m "Update version" --allow-empty
