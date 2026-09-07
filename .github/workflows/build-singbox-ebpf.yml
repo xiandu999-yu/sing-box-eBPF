@@ -568,14 +568,12 @@ jobs:
       - name: Clone Android client repository (jasmoli/sing-box-for-android)
         run: |
           set -eux
-          # 从 ci/pins.env 读取指定的提交哈希
           if [ -z "$ANDROID_REPO_COMMIT" ]; then
             echo "ERROR: ANDROID_REPO_COMMIT is not defined in ci/pins.env" >&2
             exit 1
           fi
           git clone --filter=blob:none --no-checkout https://github.com/jasmoli/sing-box-for-android repo-android
           git -C repo-android checkout "$ANDROID_REPO_COMMIT"
-          # 如果仓库有子模块，初始化它们（可选）
           git -C repo-android submodule update --init --recursive || true
 
       - name: Setup Go
@@ -619,22 +617,6 @@ jobs:
 
       - name: Merge libraries
         run: |
-          # 使用 repo-android 中的 merge_aar 工具（如果存在），否则使用 repo 中的（但未克隆）
-          # 由于我们没有克隆主 sing-box 仓库，我们可以使用 go 命令直接运行，但需要源码。
-          # 更稳妥：直接使用预先编译好的 merge_aar 二进制，或者从缓存获取。
-          # 最简单的做法：从原仓库中提取 merge_aar 工具，但为了减少依赖，我们可以直接复制 AAR 并合并。
-          # 这里我们假设 repo-android 可能已经有合并工具，或者我们手动合并。
-          # 鉴于时间，我们使用 go run 从原仓库？但原仓库未克隆。
-          # 替代方案：我们使用通用的 zip 合并？但 AAR 是特殊格式，合并需要处理 manifest 等。
-          # 既然原工作流使用 go run ./cmd/internal/merge_aar，该工具位于 sing-box 仓库。
-          # 为了节省时间，我们克隆 sing-box 仓库的轻量版本（只包含该工具），或者使用预编译的二进制。
-          # 最稳妥：重新克隆 sing-box 仓库（但只用于工具）？
-          # 我们可以克隆 reF1nd/sing-box 的特定 commit，但会增加时间。
-          # 更好的方法：将 merge_aar 工具复制到当前工作区或使用环境变量。
-          # 由于用户可能期望直接工作，我们可复用之前克隆的 repo？但那是 build-android-lib 的 workspace，在不同作业间无法共享。
-          # 所以我们需要重新克隆一个 sing-box 仓库用于工具。
-          # 但我们可以利用 actions/cache 缓存该工具。
-          # 简易方案：在 build-android 中克隆 reF1nd/sing-box（浅克隆）只为了运行 merge_aar。
           set -eux
           git clone --filter=blob:none --depth 1 --no-checkout https://github.com/reF1nd/sing-box tmp-repo
           git -C tmp-repo checkout "$SING_BOX_COMMIT"
@@ -643,6 +625,18 @@ jobs:
           go run ./cmd/internal/merge_aar -output ../libbox-legacy.aar ../libbox-inputs/*/libbox-legacy.aar
           cd ..
           rm -rf tmp-repo
+
+      - name: Setup signing keystore
+        run: |
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > repo-android/app/release.keystore
+            echo "KEYSTORE_FILE=repo-android/app/release.keystore" >> $GITHUB_ENV
+            echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+            echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
+          else
+            echo "Warning: KEYSTORE_BASE64 secret not set, build will fail if release signing is required."
+          fi
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
@@ -654,7 +648,16 @@ jobs:
           mkdir -p repo-android/app/libs
           cp *.aar repo-android/app/libs
           cd repo-android
-          ./gradlew --build-cache --parallel ${{ matrix.task }}
+          if [ -f "$KEYSTORE_FILE" ]; then
+            ./gradlew --build-cache --parallel ${{ matrix.task }} \
+              -Pandroid.injected.signing.store.file="$KEYSTORE_FILE" \
+              -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+              -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+              -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+          else
+            echo "No keystore found, skipping signing. Build will fail if release requires signing."
+            exit 1
+          fi
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
@@ -663,7 +666,6 @@ jobs:
         run: |
           mkdir -p dist
           cp repo-android/${{ matrix.output }} dist
-          # 尝试从 version.properties 读取版本信息（如果存在）
           if [ -f repo-android/version.properties ]; then
             VERSION_CODE=$(grep VERSION_CODE repo-android/version.properties | cut -d= -f2)
             VERSION_NAME=$(grep VERSION_NAME repo-android/version.properties | cut -d= -f2)
