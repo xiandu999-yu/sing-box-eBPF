@@ -449,90 +449,6 @@ jobs:
           name: binary-linux_${{ matrix.arch }}${{ matrix.goarm && format('v{0}', matrix.goarm) }}${{ matrix.go386 && format('_{0}', matrix.go386) }}${{ matrix.gomips && format('_{0}', matrix.gomips) }}${{ matrix.variant && format('-{0}', matrix.variant) }}
           path: "dist"
 
-  # ==================== Android 库构建（从外部仓库） ====================
-  build-android-lib:
-    name: Build Android library (${{ matrix.go_arch }}) from external repo
-    if: |
-      (github.event_name == 'push' && (github.ref == 'refs/heads/stable' || github.ref == 'refs/heads/testing')) ||
-      (github.event_name == 'workflow_dispatch' && (inputs.build == 'All' || inputs.build == 'Android' || inputs.build == 'publish-android'))
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        go_arch:
-          - "386"
-          - amd64
-          - arm
-          - arm64
-    steps:
-      - name: Checkout this repo (for pins.env)
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
-        with:
-          fetch-depth: 1
-
-      - name: Load pins
-        run: |
-          if [ ! -f ci/pins.env ]; then
-            echo "Error: ci/pins.env not found"
-            exit 1
-          fi
-          cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false
-
-      - name: Cache Go modules
-        uses: actions/cache@v4
-        with:
-          path: ~/go/pkg/mod
-          key: go-mod-linux-${{ hashFiles('go.sum') }}
-          restore-keys: go-mod-linux-
-
-      - name: Clone external repository (reF1nd/sing-box)
-        run: |
-          set -eux
-          git clone --filter=blob:none --no-checkout https://github.com/reF1nd/sing-box repo
-          git -C repo checkout "$SING_BOX_COMMIT"
-          git -C repo submodule update --init --recursive || true
-
-      - name: Setup Android NDK
-        id: setup-ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r28
-
-      - name: Setup OpenJDK
-        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
-        with:
-          distribution: temurin
-          java-version: 17
-
-      - name: Set tag (for reference)
-        run: |
-          git ls-remote --exit-code --tags origin "v${{ env.SING_BOX_VERSION }}" || echo "PUBLISHED=false" >> "$GITHUB_ENV"
-          git tag "v${{ env.SING_BOX_VERSION }}" -f
-
-      - name: Build library
-        run: |
-          cd repo
-          make lib_install
-          export PATH="$PATH:$(go env GOPATH)/bin"
-          go run ./cmd/internal/build_libbox -target android -platform android/${{ matrix.go_arch }}
-          mkdir -p ../dist/${{ matrix.go_arch }}
-          mv libbox.aar libbox-legacy.aar ../dist/${{ matrix.go_arch }}
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-
-      - name: Upload library
-        uses: actions/upload-artifact@v4
-        with:
-          name: libbox-android-${{ matrix.go_arch }}
-          path: dist
-          compression-level: 0
-
   # ==================== Android 客户端构建（从外部仓库） ====================
   build-android:
     name: Build Android (${{ matrix.variant }}) from external repo
@@ -655,7 +571,8 @@ jobs:
         run: |
           cd repo
           go run -v ./cmd/internal/update_android_version --ci || true
-          git add clients/android/version.properties
+          cd clients/android
+          git add version.properties
           git commit -m "Update version" --allow-empty
 
       - name: Update nightly version (for push)
@@ -663,7 +580,8 @@ jobs:
         run: |
           cd repo
           go run -v ./cmd/internal/update_android_version --ci --nightly || true
-          git add clients/android/version.properties
+          cd clients/android
+          git add version.properties
           git commit -m "Update version" --allow-empty
 
       - name: Build
