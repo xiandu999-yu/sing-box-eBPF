@@ -565,10 +565,10 @@ jobs:
           fi
           cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
 
-      - name: Clone external repository (CHIZI-0618/sing-box)
+      - name: Clone external repository (reF1nd/sing-box)
         run: |
           set -eux
-          git clone --filter=blob:none --no-checkout https://github.com/CHIZI-0618/sing-box repo
+          git clone --filter=blob:none --no-checkout https://github.com/reF1nd/sing-box repo
           git -C repo checkout "$SING_BOX_COMMIT"
           git -C repo submodule update --init --recursive || true
 
