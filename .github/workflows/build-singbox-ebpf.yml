@@ -1,4 +1,4 @@
-name: Build sing-box (eBPF only)
+name: Build (eBPF-enabled from reF1nd/sing-box)
 
 on:
   workflow_dispatch:
@@ -15,14 +15,9 @@ on:
           - Linux
           - publish-android
       test_message:
-        description: "TestFlight test message"   # 已废弃
+        description: "TestFlight test message"   # 已废弃，保留兼容
         required: false
         type: string
-      build_ebpf:
-        description: "Build eBPF-enabled binaries (manual override)"
-        required: false
-        type: boolean
-        default: false
   push:
     branches:
       - stable
@@ -37,9 +32,9 @@ env:
   GO_VERSION: "1.26.7"
 
 jobs:
-  # ==================== 常规 Linux 二进制构建 ====================
+  # ==================== Linux 二进制构建（从外部仓库） ====================
   build-linux:
-    name: Build Linux binaries
+    name: Build Linux binaries (from reF1nd/sing-box)
     if: github.event_name != 'workflow_dispatch' || inputs.build == 'All' || inputs.build == 'Binary' || inputs.build == 'Linux'
     runs-on: ubuntu-26.04
     strategy:
@@ -86,12 +81,11 @@ jobs:
 
       - name: Load pins
         run: |
-          if [ -f ci/pins.env ]; then
-            cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
-          else
+          if [ ! -f ci/pins.env ]; then
             echo "Error: ci/pins.env not found"
             exit 1
           fi
+          cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -105,6 +99,13 @@ jobs:
           path: ~/go/pkg/mod
           key: go-mod-linux-${{ hashFiles('go.sum') }}
           restore-keys: go-mod-linux-
+
+      - name: Clone external repository (reF1nd/sing-box)
+        run: |
+          set -eux
+          git clone --filter=blob:none --no-checkout https://github.com/reF1nd/sing-box repo
+          git -C repo checkout "$SING_BOX_COMMIT"
+          git -C repo submodule update --init --recursive || true
 
       - name: Clone cronet-go (if naive and not purego)
         if: matrix.naive && matrix.variant != 'purego'
@@ -153,14 +154,17 @@ jobs:
           git ls-remote --exit-code --tags origin "v${{ env.SING_BOX_VERSION }}" || echo "PUBLISHED=false" >> "$GITHUB_ENV"
           git tag "v${{ env.SING_BOX_VERSION }}" -f
 
-      - name: Set build tags
+      - name: Set build tags (with eBPF)
         run: |
           set -xeuo pipefail
+          # 从外部仓库读取基础标签，并追加 with_ebpf
           if [[ "${{ matrix.naive }}" == "true" ]]; then
-            TAGS=$(cat release/DEFAULT_BUILD_TAGS)
+            BASE_TAGS=$(cat repo/release/DEFAULT_BUILD_TAGS)
           else
-            TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS)
+            BASE_TAGS=$(cat repo/release/DEFAULT_BUILD_TAGS_OTHERS)
           fi
+          # 强制追加 with_ebpf
+          TAGS="${BASE_TAGS},with_ebpf"
           if [[ "${{ matrix.variant }}" == "purego" ]]; then
             TAGS="${TAGS},with_purego"
           elif [[ "${{ matrix.variant }}" == "musl" ]]; then
@@ -170,14 +174,15 @@ jobs:
 
       - name: Set shared ldflags
         run: |
-          echo "LDFLAGS_SHARED=$(cat release/LDFLAGS)" >> "${GITHUB_ENV}"
+          echo "LDFLAGS_SHARED=$(cat repo/release/LDFLAGS)" >> "${GITHUB_ENV}"
 
       - name: Build (purego)
         if: matrix.variant == 'purego'
         run: |
           set -xeuo pipefail
           mkdir -p dist
-          go build -v -trimpath -o dist/sing-box -tags "${BUILD_TAGS}" \
+          cd repo
+          go build -v -trimpath -o ../dist/sing-box -tags "${BUILD_TAGS}" \
           -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ env.SING_BOX_VERSION }}' ${LDFLAGS_SHARED} -s -w -buildid=" \
           ./cmd/sing-box
         env:
@@ -208,7 +213,8 @@ jobs:
         run: |
           set -xeuo pipefail
           mkdir -p dist
-          go build -v -trimpath -o dist/sing-box -tags "${BUILD_TAGS}" \
+          cd repo
+          go build -v -trimpath -o ../dist/sing-box -tags "${BUILD_TAGS}" \
           -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ env.SING_BOX_VERSION }}' ${LDFLAGS_SHARED} -s -w -buildid=" \
           ./cmd/sing-box
         env:
@@ -226,7 +232,8 @@ jobs:
         run: |
           set -xeuo pipefail
           mkdir -p dist
-          go build -v -trimpath -o dist/sing-box -tags "${BUILD_TAGS}" \
+          cd repo
+          go build -v -trimpath -o ../dist/sing-box -tags "${BUILD_TAGS}" \
           -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ env.SING_BOX_VERSION }}' ${LDFLAGS_SHARED} -s -w -buildid=" \
           ./cmd/sing-box
         env:
@@ -244,7 +251,8 @@ jobs:
         run: |
           set -xeuo pipefail
           mkdir -p dist
-          go build -v -trimpath -o dist/sing-box -tags "${BUILD_TAGS}" \
+          cd repo
+          go build -v -trimpath -o ../dist/sing-box -tags "${BUILD_TAGS}" \
           -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ env.SING_BOX_VERSION }}' ${LDFLAGS_SHARED} -s -w -buildid=" \
           ./cmd/sing-box
         env:
@@ -395,90 +403,9 @@ jobs:
           name: binary-linux_${{ matrix.arch }}${{ matrix.goarm && format('v{0}', matrix.goarm) }}${{ matrix.go386 && format('_{0}', matrix.go386) }}${{ matrix.gomips && format('_{0}', matrix.gomips) }}${{ matrix.variant && format('-{0}', matrix.variant) }}
           path: "dist"
 
-  # ==================== eBPF 构建（外部仓库 reF1nd/sing-box） ====================
-  build-ebpf:
-    name: Build eBPF binaries (amd64 & arm64) from external repo
-    if: |
-      (github.event_name == 'push' && (github.ref == 'refs/heads/stable' || github.ref == 'refs/heads/testing')) ||
-      (github.event_name == 'workflow_dispatch' && inputs.build_ebpf == true)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout this repo (for pins.env)
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
-        with:
-          fetch-depth: 1
-
-      - name: Load pins
-        run: |
-          if [ -f ci/pins.env ]; then
-            cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
-          else
-            echo "Error: ci/pins.env not found"
-            exit 1
-          fi
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false
-
-      - name: Clone external repository and checkout commit
-        run: |
-          set -eux
-          git clone --filter=blob:none --no-checkout https://github.com/reF1nd/sing-box repo
-          git -C repo checkout "$SING_BOX_COMMIT"
-          git -C repo submodule update --init --recursive || true
-
-      - name: Build eBPF binaries
-        run: |
-          set -eux
-          mkdir -p dist
-
-          build_arch() {
-            local arch=$1
-            local output="dist/sing-box-${SING_BOX_VERSION}-linux-${arch}"
-            (
-              cd repo
-              BASE_TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS)
-              export TAGS="${BASE_TAGS},with_ebpf"
-              export CGO_ENABLED=0
-              export GOOS=linux
-              export GOARCH="$arch"
-              make build
-            )
-            mv repo/sing-box "$output"
-            tar -czf "${output}.tar.gz" -C dist "$(basename "$output")"
-            rm "$output"
-          }
-
-          build_arch amd64
-          build_arch arm64
-
-      - name: Upload to release (sing-box-ebpf)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view sing-box-ebpf --repo "${{ github.repository }}" >/dev/null 2>&1 || \
-            gh release create sing-box-ebpf --repo "${{ github.repository }}" \
-              --title "sing-box eBPF binaries" \
-              --notes "Auto-built sing-box binaries (eBPF-enabled, amd64/arm64)." \
-              --latest=false
-
-          for file in dist/*.tar.gz; do
-            gh release upload sing-box-ebpf "$file" --repo "${{ github.repository }}" --clobber
-          done
-
-          # 只保留最近 3 个 assets
-          gh release view sing-box-ebpf --repo "${{ github.repository }}" --json assets \
-            --jq '.assets | sort_by(.createdAt) | reverse | .[3:] | .[].name' \
-            | while read -r old; do
-                [ -n "$old" ] && gh release delete-asset sing-box-ebpf "$old" --repo "${{ github.repository }}" -y
-              done
-
-  # ==================== Android 库构建 ====================
+  # ==================== Android 库构建（从外部仓库） ====================
   build-android-lib:
-    name: Build Android library (${{ matrix.go_arch }})
+    name: Build Android library (${{ matrix.go_arch }}) from external repo
     if: |
       (github.event_name == 'push' && (github.ref == 'refs/heads/stable' || github.ref == 'refs/heads/testing')) ||
       (github.event_name == 'workflow_dispatch' && (inputs.build == 'All' || inputs.build == 'Android' || inputs.build == 'publish-android'))
@@ -499,12 +426,11 @@ jobs:
 
       - name: Load pins
         run: |
-          if [ -f ci/pins.env ]; then
-            cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
-          else
+          if [ ! -f ci/pins.env ]; then
             echo "Error: ci/pins.env not found"
             exit 1
           fi
+          cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -518,6 +444,13 @@ jobs:
           path: ~/go/pkg/mod
           key: go-mod-linux-${{ hashFiles('go.sum') }}
           restore-keys: go-mod-linux-
+
+      - name: Clone external repository (reF1nd/sing-box)
+        run: |
+          set -eux
+          git clone --filter=blob:none --no-checkout https://github.com/reF1nd/sing-box repo
+          git -C repo checkout "$SING_BOX_COMMIT"
+          git -C repo submodule update --init --recursive || true
 
       - name: Setup Android NDK
         id: setup-ndk
@@ -538,11 +471,12 @@ jobs:
 
       - name: Build library
         run: |
+          cd repo
           make lib_install
           export PATH="$PATH:$(go env GOPATH)/bin"
           go run ./cmd/internal/build_libbox -target android -platform android/${{ matrix.go_arch }}
-          mkdir -p dist/${{ matrix.go_arch }}
-          mv libbox.aar libbox-legacy.aar dist/${{ matrix.go_arch }}
+          mkdir -p ../dist/${{ matrix.go_arch }}
+          mv libbox.aar libbox-legacy.aar ../dist/${{ matrix.go_arch }}
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
@@ -553,9 +487,9 @@ jobs:
           path: dist
           compression-level: 0
 
-  # ==================== Android 客户端构建 ====================
+  # ==================== Android 客户端构建（从外部仓库） ====================
   build-android:
-    name: Build Android (${{ matrix.variant }})
+    name: Build Android (${{ matrix.variant }}) from external repo
     if: |
       (github.event_name == 'push' && (github.ref == 'refs/heads/stable' || github.ref == 'refs/heads/testing')) ||
       (github.event_name == 'workflow_dispatch' && (inputs.build == 'All' || inputs.build == 'Android'))
@@ -580,15 +514,23 @@ jobs:
 
       - name: Load pins
         run: |
-          if [ -f ci/pins.env ]; then
-            cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
-          else
+          if [ ! -f ci/pins.env ]; then
             echo "Error: ci/pins.env not found"
             exit 1
           fi
+          cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
 
-      - name: Checkout Android client
-        run: git submodule update --init clients/android
+      - name: Clone external repository (reF1nd/sing-box)
+        run: |
+          set -eux
+          git clone --filter=blob:none --no-checkout https://github.com/reF1nd/sing-box repo
+          git -C repo checkout "$SING_BOX_COMMIT"
+          git -C repo submodule update --init --recursive || true
+
+      - name: Checkout Android client submodule
+        run: |
+          cd repo
+          git submodule update --init clients/android
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -636,24 +578,25 @@ jobs:
 
       - name: Merge libraries
         run: |
-          go run ./cmd/internal/merge_aar -output libbox.aar libbox-inputs/*/libbox.aar
-          go run ./cmd/internal/merge_aar -output libbox-legacy.aar libbox-inputs/*/libbox-legacy.aar
+          cd repo
+          go run ./cmd/internal/merge_aar -output ../libbox.aar ../libbox-inputs/*/libbox.aar
+          go run ./cmd/internal/merge_aar -output ../libbox-legacy.aar ../libbox-inputs/*/libbox-legacy.aar
 
-      - name: Checkout main branch
+      - name: Checkout main branch (if stable push)
         if: github.ref == 'refs/heads/stable' && github.event_name != 'workflow_dispatch'
         run: |
-          cd clients/android
+          cd repo/clients/android
           git checkout main
 
-      - name: Checkout dev branch
+      - name: Checkout dev branch (if testing push)
         if: github.ref == 'refs/heads/testing'
         run: |
-          cd clients/android
+          cd repo/clients/android
           git checkout dev
 
       - name: Checkout submodule recursive
         run: |
-          cd clients/android
+          cd repo/clients/android
           git submodule update --init --recursive -v
 
       - name: Setup Gradle
@@ -664,18 +607,20 @@ jobs:
       - name: Update version (for dispatch)
         if: github.event_name == 'workflow_dispatch'
         run: |
+          cd repo
           go run -v ./cmd/internal/update_android_version --ci
 
       - name: Update nightly version (for push)
         if: github.event_name != 'workflow_dispatch'
         run: |
+          cd repo
           go run -v ./cmd/internal/update_android_version --ci --nightly
 
       - name: Build
         run: |
-          mkdir -p clients/android/app/libs
-          cp *.aar clients/android/app/libs
-          cd clients/android
+          mkdir -p repo/clients/android/app/libs
+          cp *.aar repo/clients/android/app/libs
+          cd repo/clients/android
           ./gradlew --build-cache --parallel ${{ matrix.task }}
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -684,9 +629,9 @@ jobs:
       - name: Prepare upload
         run: |
           mkdir -p dist
-          cp clients/android/${{ matrix.output }} dist
-          VERSION_CODE=$(grep VERSION_CODE clients/android/version.properties | cut -d= -f2)
-          VERSION_NAME=$(grep VERSION_NAME clients/android/version.properties | cut -d= -f2)
+          cp repo/clients/android/${{ matrix.output }} dist
+          VERSION_CODE=$(grep VERSION_CODE repo/clients/android/version.properties | cut -d= -f2)
+          VERSION_NAME=$(grep VERSION_NAME repo/clients/android/version.properties | cut -d= -f2)
           cat > dist/SFA-version-metadata.json << EOF
           {
             "version_code": ${VERSION_CODE},
@@ -716,15 +661,23 @@ jobs:
 
       - name: Load pins
         run: |
-          if [ -f ci/pins.env ]; then
-            cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
-          else
+          if [ ! -f ci/pins.env ]; then
             echo "Error: ci/pins.env not found"
             exit 1
           fi
+          cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
 
-      - name: Checkout Android client
-        run: git submodule update --init clients/android
+      - name: Clone external repository (reF1nd/sing-box)
+        run: |
+          set -eux
+          git clone --filter=blob:none --no-checkout https://github.com/reF1nd/sing-box repo
+          git -C repo checkout "$SING_BOX_COMMIT"
+          git -C repo submodule update --init --recursive || true
+
+      - name: Checkout Android client submodule
+        run: |
+          cd repo
+          git submodule update --init clients/android
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -772,24 +725,25 @@ jobs:
 
       - name: Merge libraries
         run: |
-          go run ./cmd/internal/merge_aar -output libbox.aar libbox-inputs/*/libbox.aar
-          go run ./cmd/internal/merge_aar -output libbox-legacy.aar libbox-inputs/*/libbox-legacy.aar
+          cd repo
+          go run ./cmd/internal/merge_aar -output ../libbox.aar ../libbox-inputs/*/libbox.aar
+          go run ./cmd/internal/merge_aar -output ../libbox-legacy.aar ../libbox-inputs/*/libbox-legacy.aar
 
-      - name: Checkout main branch
+      - name: Checkout main branch (if stable)
         if: github.ref == 'refs/heads/stable'
         run: |
-          cd clients/android
+          cd repo/clients/android
           git checkout main
 
-      - name: Checkout dev branch
+      - name: Checkout dev branch (if testing)
         if: github.ref == 'refs/heads/testing'
         run: |
-          cd clients/android
+          cd repo/clients/android
           git checkout dev
 
       - name: Checkout submodule recursive
         run: |
-          cd clients/android
+          cd repo/clients/android
           git submodule update --init --recursive -v
 
       - name: Setup Gradle
@@ -799,9 +753,10 @@ jobs:
 
       - name: Prepare build
         run: |
+          cd repo
           go run -v ./cmd/internal/update_android_version --ci
           mkdir -p clients/android/app/libs
-          cp *.aar clients/android/app/libs
+          cp ../*.aar clients/android/app/libs
           cd clients/android
           echo -n "$SERVICE_ACCOUNT_CREDENTIALS" | base64 --decode > service-account-credentials.json
           chmod 600 service-account-credentials.json
@@ -819,13 +774,13 @@ jobs:
 
       - name: Publish to Google Play
         run: |
-          cd clients/android
+          cd repo/clients/android
           ./gradlew --build-cache --parallel :app:publishPlayReleaseBundle
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
 
-  # ==================== 上传常规产物到版本 Release ====================
+  # ==================== 上传所有产物到版本 Release ====================
   upload:
     name: Upload builds
     if: "!failure() && github.event_name == 'workflow_dispatch' && (inputs.build == 'All' || inputs.build == 'Binary' || inputs.build == 'Android' || inputs.build == 'Linux')"
@@ -838,21 +793,19 @@ jobs:
     needs:
       - build-linux
       - build-android
-      # 注意：build-ebpf 不上传到版本 Release，所以不依赖
     steps:
-      - name: Checkout this repo (for pins.env and version)
+      - name: Checkout this repo (for pins.env)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
         with:
           fetch-depth: 1
 
       - name: Load pins
         run: |
-          if [ -f ci/pins.env ]; then
-            cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
-          else
+          if [ ! -f ci/pins.env ]; then
             echo "Error: ci/pins.env not found"
             exit 1
           fi
+          cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
 
       - name: Cache ghr
         uses: actions/cache@v4
@@ -913,7 +866,6 @@ jobs:
       actions: write
     needs:
       - build-linux
-      - build-ebpf
       - build-android-lib
       - build-android
       - upload
