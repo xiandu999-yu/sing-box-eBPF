@@ -654,13 +654,16 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: |
           cd repo
-          go run -v ./cmd/internal/update_android_version --ci --force
+          # Stash any uncommitted changes to make the workspace clean
+          git stash push -u -m "stash before update_version" || true
+          go run -v ./cmd/internal/update_android_version --ci
 
       - name: Update nightly version (for push)
         if: github.event_name != 'workflow_dispatch'
         run: |
           cd repo
-          go run -v ./cmd/internal/update_android_version --ci --nightly --force
+          git stash push -u -m "stash before update_version" || true
+          go run -v ./cmd/internal/update_android_version --ci --nightly
 
       - name: Build
         run: |
