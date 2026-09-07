@@ -449,170 +449,252 @@ jobs:
           name: binary-linux_${{ matrix.arch }}${{ matrix.goarm && format('v{0}', matrix.goarm) }}${{ matrix.go386 && format('_{0}', matrix.go386) }}${{ matrix.gomips && format('_{0}', matrix.gomips) }}${{ matrix.variant && format('-{0}', matrix.variant) }}
           path: "dist"
 
-    # ==================== Android 客户端构建（从外部仓库） ====================
-    build-android:
-      name: Build Android (${{ matrix.variant }}) from external repo
-      if: |
-        (github.event_name == 'push' && (github.ref == 'refs/heads/stable' || github.ref == 'refs/heads/testing')) ||
-        (github.event_name == 'workflow_dispatch' && (inputs.build == 'All' || inputs.build == 'Android'))
-      runs-on: ubuntu-latest
-      needs:
-        - build-android-lib
-      strategy:
-        fail-fast: false
-        matrix:
-          include:
-            - variant: other
-              task: :app:assembleOtherRelease
-              output: app/build/outputs/apk/other/release/*.apk
-            - variant: other-legacy
-              task: :app:assembleOtherLegacyRelease
-              output: app/build/outputs/apk/otherLegacy/release/*.apk
-      steps:
-        - name: Checkout this repo (for pins.env)
-          uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
-          with:
-            fetch-depth: 1
+  # ==================== Android 库构建（从外部仓库） ====================
+  build-android-lib:
+    name: Build Android library (${{ matrix.go_arch }}) from external repo
+    if: |
+      (github.event_name == 'push' && (github.ref == 'refs/heads/stable' || github.ref == 'refs/heads/testing')) ||
+      (github.event_name == 'workflow_dispatch' && (inputs.build == 'All' || inputs.build == 'Android' || inputs.build == 'publish-android'))
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go_arch:
+          - "386"
+          - amd64
+          - arm
+          - arm64
+    steps:
+      - name: Checkout this repo (for pins.env)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 1
 
-        - name: Load pins
-          run: |
-            if [ ! -f ci/pins.env ]; then
-              echo "Error: ci/pins.env not found"
-              exit 1
-            fi
-            cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
+      - name: Load pins
+        run: |
+          if [ ! -f ci/pins.env ]; then
+            echo "Error: ci/pins.env not found"
+            exit 1
+          fi
+          cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
 
-        - name: Clone external repository (CHIZI-0618/sing-box)
-          run: |
-            set -eux
-            git clone --filter=blob:none --no-checkout https://github.com/CHIZI-0618/sing-box repo
-            git -C repo checkout "$SING_BOX_COMMIT"
-            git -C repo submodule update --init --recursive || true
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
 
-        - name: Checkout Android client submodule
-          run: |
-            cd repo
-            git submodule update --init clients/android
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-linux-${{ hashFiles('go.sum') }}
+          restore-keys: go-mod-linux-
 
-        - name: Setup Go
-          uses: actions/setup-go@v5
-          with:
-            go-version: ${{ env.GO_VERSION }}
-            cache: false
+      - name: Clone external repository (reF1nd/sing-box)
+        run: |
+          set -eux
+          git clone --filter=blob:none --no-checkout https://github.com/reF1nd/sing-box repo
+          git -C repo checkout "$SING_BOX_COMMIT"
+          git -C repo submodule update --init --recursive || true
 
-        - name: Cache Go modules
-          uses: actions/cache/restore@v4
-          with:
-            path: ~/go/pkg/mod
-            key: go-mod-linux-${{ hashFiles('go.sum') }}
-            restore-keys: go-mod-linux-
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28
 
-        - name: Cache Go tool builds
-          uses: actions/cache@v4
-          with:
-            path: ~/.cache/go-build
-            key: go-build-tools-linux-${{ hashFiles('go.sum') }}
-            restore-keys: go-build-tools-linux-
+      - name: Setup OpenJDK
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: 17
 
-        - name: Setup Android NDK
-          id: setup-ndk
-          uses: nttld/setup-ndk@v1
-          with:
-            ndk-version: r28
+      - name: Set tag (for reference)
+        run: |
+          git ls-remote --exit-code --tags origin "v${{ env.SING_BOX_VERSION }}" || echo "PUBLISHED=false" >> "$GITHUB_ENV"
+          git tag "v${{ env.SING_BOX_VERSION }}" -f
 
-        - name: Setup OpenJDK
-          uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
-          with:
-            distribution: temurin
-            java-version: 17
+      - name: Build library
+        run: |
+          cd repo
+          make lib_install
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          go run ./cmd/internal/build_libbox -target android -platform android/${{ matrix.go_arch }}
+          mkdir -p ../dist/${{ matrix.go_arch }}
+          mv libbox.aar libbox-legacy.aar ../dist/${{ matrix.go_arch }}
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-        - name: Set tag (for reference)
-          run: |
-            git ls-remote --exit-code --tags origin "v${{ env.SING_BOX_VERSION }}" || echo "PUBLISHED=false" >> "$GITHUB_ENV"
-            git tag "v${{ env.SING_BOX_VERSION }}" -f
+      - name: Upload library
+        uses: actions/upload-artifact@v4
+        with:
+          name: libbox-android-${{ matrix.go_arch }}
+          path: dist
+          compression-level: 0
 
-        - name: Download libraries
-          uses: actions/download-artifact@v4
-          with:
-            pattern: libbox-android-*
-            path: libbox-inputs
-            merge-multiple: true
+  # ==================== Android 客户端构建（从外部仓库） ====================
+  build-android:
+    name: Build Android (${{ matrix.variant }}) from external repo
+    if: |
+      (github.event_name == 'push' && (github.ref == 'refs/heads/stable' || github.ref == 'refs/heads/testing')) ||
+      (github.event_name == 'workflow_dispatch' && (inputs.build == 'All' || inputs.build == 'Android'))
+    runs-on: ubuntu-latest
+    needs:
+      - build-android-lib
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: other
+            task: :app:assembleOtherRelease
+            output: app/build/outputs/apk/other/release/*.apk
+          - variant: other-legacy
+            task: :app:assembleOtherLegacyRelease
+            output: app/build/outputs/apk/otherLegacy/release/*.apk
+    steps:
+      - name: Checkout this repo (for pins.env)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 1
 
-        - name: Merge libraries
-          run: |
-            cd repo
-            go run ./cmd/internal/merge_aar -output ../libbox.aar ../libbox-inputs/*/libbox.aar
-            go run ./cmd/internal/merge_aar -output ../libbox-legacy.aar ../libbox-inputs/*/libbox-legacy.aar
+      - name: Load pins
+        run: |
+          if [ ! -f ci/pins.env ]; then
+            echo "Error: ci/pins.env not found"
+            exit 1
+          fi
+          cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
 
-        - name: Checkout main branch (if stable push)
-          if: github.ref == 'refs/heads/stable' && github.event_name != 'workflow_dispatch'
-          run: |
-            cd repo/clients/android
-            git checkout main
+      - name: Clone external repository (CHIZI-0618/sing-box)
+        run: |
+          set -eux
+          git clone --filter=blob:none --no-checkout https://github.com/CHIZI-0618/sing-box repo
+          git -C repo checkout "$SING_BOX_COMMIT"
+          git -C repo submodule update --init --recursive || true
 
-        - name: Checkout dev branch (if testing push)
-          if: github.ref == 'refs/heads/testing'
-          run: |
-            cd repo/clients/android
-            git checkout dev
+      - name: Checkout Android client submodule
+        run: |
+          cd repo
+          git submodule update --init clients/android
 
-        - name: Checkout submodule recursive
-          run: |
-            cd repo/clients/android
-            git submodule update --init --recursive -v
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
 
-        - name: Setup Gradle
-          uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
-          with:
-            cache-provider: basic
+      - name: Cache Go modules
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-linux-${{ hashFiles('go.sum') }}
+          restore-keys: go-mod-linux-
 
-        - name: Update version (for dispatch)
-          if: github.event_name == 'workflow_dispatch'
-          run: |
-            cd repo
-            go run -v ./cmd/internal/update_android_version --ci || true
-            cd clients/android
-            git add version.properties
-            git commit -m "Update version" --allow-empty
+      - name: Cache Go tool builds
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-build
+          key: go-build-tools-linux-${{ hashFiles('go.sum') }}
+          restore-keys: go-build-tools-linux-
 
-        - name: Update nightly version (for push)
-          if: github.event_name != 'workflow_dispatch'
-          run: |
-            cd repo
-            go run -v ./cmd/internal/update_android_version --ci --nightly || true
-            cd clients/android
-            git add version.properties
-            git commit -m "Update version" --allow-empty
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28
 
-        - name: Build
-          run: |
-            mkdir -p repo/clients/android/app/libs
-            cp *.aar repo/clients/android/app/libs
-            cd repo/clients/android
-            ./gradlew --build-cache --parallel ${{ matrix.task }}
-          env:
-            ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-            LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+      - name: Setup OpenJDK
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: 17
 
-        - name: Prepare upload
-          run: |
-            mkdir -p dist
-            cp repo/clients/android/${{ matrix.output }} dist
-            VERSION_CODE=$(grep VERSION_CODE repo/clients/android/version.properties | cut -d= -f2)
-            VERSION_NAME=$(grep VERSION_NAME repo/clients/android/version.properties | cut -d= -f2)
-            cat > dist/SFA-version-metadata.json << EOF
-            {
-                "version_code": ${VERSION_CODE},
-                "version_name": "${VERSION_NAME}"
-            }
-            EOF
-            cat dist/SFA-version-metadata.json
+      - name: Set tag (for reference)
+        run: |
+          git ls-remote --exit-code --tags origin "v${{ env.SING_BOX_VERSION }}" || echo "PUBLISHED=false" >> "$GITHUB_ENV"
+          git tag "v${{ env.SING_BOX_VERSION }}" -f
 
-        - name: Upload artifact
-          uses: actions/upload-artifact@v4
-          with:
-            name: binary-android-apks-${{ matrix.variant }}
-            path: 'dist'
+      - name: Download libraries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: libbox-android-*
+          path: libbox-inputs
+          merge-multiple: true
+
+      - name: Merge libraries
+        run: |
+          cd repo
+          go run ./cmd/internal/merge_aar -output ../libbox.aar ../libbox-inputs/*/libbox.aar
+          go run ./cmd/internal/merge_aar -output ../libbox-legacy.aar ../libbox-inputs/*/libbox-legacy.aar
+
+      - name: Checkout main branch (if stable push)
+        if: github.ref == 'refs/heads/stable' && github.event_name != 'workflow_dispatch'
+        run: |
+          cd repo/clients/android
+          git checkout main
+
+      - name: Checkout dev branch (if testing push)
+        if: github.ref == 'refs/heads/testing'
+        run: |
+          cd repo/clients/android
+          git checkout dev
+
+      - name: Checkout submodule recursive
+        run: |
+          cd repo/clients/android
+          git submodule update --init --recursive -v
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+        with:
+          cache-provider: basic
+
+      - name: Update version (for dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          cd repo
+          go run -v ./cmd/internal/update_android_version --ci || true
+          git add clients/android/version.properties
+          git commit -m "Update version" --allow-empty
+
+      - name: Update nightly version (for push)
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          cd repo
+          go run -v ./cmd/internal/update_android_version --ci --nightly || true
+          git add clients/android/version.properties
+          git commit -m "Update version" --allow-empty
+
+      - name: Build
+        run: |
+          mkdir -p repo/clients/android/app/libs
+          cp *.aar repo/clients/android/app/libs
+          cd repo/clients/android
+          ./gradlew --build-cache --parallel ${{ matrix.task }}
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+
+      - name: Prepare upload
+        run: |
+          mkdir -p dist
+          cp repo/clients/android/${{ matrix.output }} dist
+          VERSION_CODE=$(grep VERSION_CODE repo/clients/android/version.properties | cut -d= -f2)
+          VERSION_NAME=$(grep VERSION_NAME repo/clients/android/version.properties | cut -d= -f2)
+          cat > dist/SFA-version-metadata.json << EOF
+          {
+            "version_code": ${VERSION_CODE},
+            "version_name": "${VERSION_NAME}"
+          }
+          EOF
+          cat dist/SFA-version-metadata.json
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-android-apks-${{ matrix.variant }}
+          path: 'dist'
 
   # ==================== 发布 Android 到 Google Play ====================
   publish-android:
