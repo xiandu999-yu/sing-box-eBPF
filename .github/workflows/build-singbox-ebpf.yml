@@ -629,13 +629,20 @@ jobs:
       - name: Setup signing keystore
         run: |
           if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            mkdir -p repo-android/app
             echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > repo-android/app/release.keystore
+            # 验证文件是否生成（可选）
+            if [ ! -s repo-android/app/release.keystore ]; then
+              echo "Error: Decoded keystore file is empty or invalid." >&2
+              exit 1
+            fi
             echo "KEYSTORE_FILE=repo-android/app/release.keystore" >> $GITHUB_ENV
             echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
             echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
             echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
           else
-            echo "Warning: KEYSTORE_BASE64 secret not set, build will fail if release signing is required."
+            echo "Error: KEYSTORE_BASE64 secret is not set. Build cannot proceed." >&2
+            exit 1
           fi
 
       - name: Setup Gradle
