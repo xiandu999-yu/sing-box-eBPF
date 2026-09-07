@@ -15,7 +15,7 @@ on:
           - Linux
           - publish-android
       test_message:
-        description: "TestFlight test message"
+        description: "TestFlight test message"   # 保留兼容
         required: false
         type: string
   push:
@@ -111,7 +111,6 @@ jobs:
         if: matrix.naive && matrix.variant != 'purego'
         run: |
           set -xeuo pipefail
-          # 从外部仓库读取 CRONET_GO_VERSION
           CRONET_GO_VERSION=$(cat repo/.github/CRONET_GO_VERSION)
           git init ~/cronet-go
           git -C ~/cronet-go remote add origin https://github.com/sagernet/cronet-go.git
@@ -385,7 +384,8 @@ jobs:
           set -xeuo pipefail
           cd dist
           mkdir -p "${DIR_NAME}"
-          cp ../LICENSE "${DIR_NAME}"
+          # 从外部仓库复制 LICENSE
+          cp ../repo/LICENSE "${DIR_NAME}"
           cp sing-box "${DIR_NAME}"
           if [ -f libcronet.so ]; then
             cp libcronet.so "${DIR_NAME}"
