@@ -280,15 +280,21 @@ jobs:
           fi
           echo "DIR_NAME=${DIR_NAME}" >> "${GITHUB_ENV}"
           
+          # DEB/RPM 版本（保留 ~）
           PKG_VERSION="${{ env.SING_BOX_VERSION }}"
           PKG_VERSION="${PKG_VERSION//-/\~}"
           echo "PKG_VERSION=${PKG_VERSION}" >> "${GITHUB_ENV}"
           
-          # APK 版本：将 - 和 ~ 都替换为 . ，符合 APK 规范
-          PKG_VERSION_APK="${{ env.SING_BOX_VERSION }}"
-          PKG_VERSION_APK="${PKG_VERSION_APK//-/.}"
-          PKG_VERSION_APK="${PKG_VERSION_APK//~/.}"
-          echo "PKG_VERSION_APK=${PKG_VERSION_APK}" >> "${GITHUB_ENV}"
+          # OpenWrt APK 版本：组合 PKG_VERSION + PKG_RELEASE
+          # 格式：将连字符替换为下划线，并以 -r${PKG_RELEASE} 结尾
+          BASE_VER="${{ env.SING_BOX_VERSION }}"
+          BASE_VER="${BASE_VER//-/_}"          # 将所有 '-' 替换为 '_'
+          if [[ -n "${{ env.PKG_RELEASE }}" ]]; then
+            OPENWRT_APK_VERSION="${BASE_VER}-r${{ env.PKG_RELEASE }}"
+          else
+            OPENWRT_APK_VERSION="${BASE_VER}"
+          fi
+          echo "OPENWRT_APK_VERSION=${OPENWRT_APK_VERSION}" >> "${GITHUB_ENV}"
 
       - name: Package DEB
         if: matrix.debian != ''
@@ -411,9 +417,9 @@ jobs:
           for architecture in ${{ matrix.openwrt }}; do
             .github/build_openwrt_apk.sh \
               "$architecture" \
-              "$PKG_VERSION_APK" \
+              "$OPENWRT_APK_VERSION" \
               "../dist/sing-box" \
-              "../dist/sing-box_${PKG_VERSION_APK}_openwrt_${architecture}.apk"
+              "../dist/sing-box_${OPENWRT_APK_VERSION}_openwrt_${architecture}.apk"
           done
           cd ..
 
@@ -424,9 +430,9 @@ jobs:
           cd repo
           .github/build_alpine_apk.sh \
             "${{ matrix.alpine }}" \
-            "$PKG_VERSION_APK" \
+            "$OPENWRT_APK_VERSION" \
             "../dist/sing-box" \
-            "../dist/sing-box_${PKG_VERSION_APK}_linux_${{ matrix.alpine }}.apk"
+            "../dist/sing-box_${OPENWRT_APK_VERSION}_linux_${{ matrix.alpine }}.apk"
           cd ..
 
       - name: Archive
