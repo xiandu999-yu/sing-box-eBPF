@@ -279,9 +279,16 @@ jobs:
             DIR_NAME="${DIR_NAME}-musl"
           fi
           echo "DIR_NAME=${DIR_NAME}" >> "${GITHUB_ENV}"
+          
           PKG_VERSION="${{ env.SING_BOX_VERSION }}"
           PKG_VERSION="${PKG_VERSION//-/\~}"
           echo "PKG_VERSION=${PKG_VERSION}" >> "${GITHUB_ENV}"
+          
+          # APK 版本：将 - 和 ~ 都替换为 . ，符合 APK 规范
+          PKG_VERSION_APK="${{ env.SING_BOX_VERSION }}"
+          PKG_VERSION_APK="${PKG_VERSION_APK//-/.}"
+          PKG_VERSION_APK="${PKG_VERSION_APK//~/.}"
+          echo "PKG_VERSION_APK=${PKG_VERSION_APK}" >> "${GITHUB_ENV}"
 
       - name: Package DEB
         if: matrix.debian != ''
@@ -404,9 +411,9 @@ jobs:
           for architecture in ${{ matrix.openwrt }}; do
             .github/build_openwrt_apk.sh \
               "$architecture" \
-              "$PKG_VERSION" \
+              "$PKG_VERSION_APK" \
               "../dist/sing-box" \
-              "../dist/sing-box_${PKG_VERSION}_openwrt_${architecture}.apk"
+              "../dist/sing-box_${PKG_VERSION_APK}_openwrt_${architecture}.apk"
           done
           cd ..
 
@@ -417,9 +424,9 @@ jobs:
           cd repo
           .github/build_alpine_apk.sh \
             "${{ matrix.alpine }}" \
-            "$PKG_VERSION" \
+            "$PKG_VERSION_APK" \
             "../dist/sing-box" \
-            "../dist/sing-box_${PKG_VERSION}_linux_${{ matrix.alpine }}.apk"
+            "../dist/sing-box_${PKG_VERSION_APK}_linux_${{ matrix.alpine }}.apk"
           cd ..
 
       - name: Archive
