@@ -404,9 +404,9 @@ jobs:
           for architecture in ${{ matrix.openwrt }}; do
             .github/build_openwrt_apk.sh \
               "$architecture" \
-              "${{ env.SING_BOX_VERSION }}" \
+              "$PKG_VERSION" \
               "../dist/sing-box" \
-              "../dist/sing-box_${{ env.SING_BOX_VERSION }}_openwrt_${architecture}.apk"
+              "../dist/sing-box_${PKG_VERSION}_openwrt_${architecture}.apk"
           done
           cd ..
 
@@ -417,9 +417,9 @@ jobs:
           cd repo
           .github/build_alpine_apk.sh \
             "${{ matrix.alpine }}" \
-            "${{ env.SING_BOX_VERSION }}" \
+            "$PKG_VERSION" \
             "../dist/sing-box" \
-            "../dist/sing-box_${{ env.SING_BOX_VERSION }}_linux_${{ matrix.alpine }}.apk"
+            "../dist/sing-box_${PKG_VERSION}_linux_${{ matrix.alpine }}.apk"
           cd ..
 
       - name: Archive
