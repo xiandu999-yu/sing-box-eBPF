@@ -309,9 +309,7 @@ jobs:
           cd ..
           if [ -n "${{ secrets.GPG_KEY }}" ] && [ -n "${{ secrets.GPG_KEY_ID }}" ] && [ -n "${{ secrets.GPG_PASSPHRASE }}" ]; then
             rm -rf $HOME/.gnupg
-            gpg --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" --import <<EOF
-            ${{ secrets.GPG_KEY }}
-            EOF
+            echo "${{ secrets.GPG_KEY }}" | gpg --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" --import
             debsigs --sign=origin -k ${{ secrets.GPG_KEY_ID }} --gpgopts '--pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}"' dist/*.deb
           else
             echo "GPG secrets not set, skipping DEB signing"
@@ -342,13 +340,8 @@ jobs:
             LICENSE=/usr/share/licenses/sing-box/LICENSE
           cd ..
           if [ -n "${{ secrets.GPG_KEY }}" ] && [ -n "${{ secrets.GPG_KEY_ID }}" ] && [ -n "${{ secrets.GPG_PASSPHRASE }}" ]; then
-            cat > $HOME/.rpmmacros <<EOF
-            %_gpg_name ${{ secrets.GPG_KEY_ID }}
-            %_gpg_sign_cmd_extra_args --pinentry-mode loopback --passphrase ${{ secrets.GPG_PASSPHRASE }}
-            EOF
-            gpg --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" --import <<EOF
-            ${{ secrets.GPG_KEY }}
-            EOF
+            printf '%%_gpg_name %s\n%%_gpg_sign_cmd_extra_args --pinentry-mode loopback --passphrase %s\n' "${{ secrets.GPG_KEY_ID }}" "${{ secrets.GPG_PASSPHRASE }}" > $HOME/.rpmmacros
+            echo "${{ secrets.GPG_KEY }}" | gpg --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" --import
             rpmsign --addsign dist/*.rpm
           else
             echo "GPG secrets not set, skipping RPM signing"
