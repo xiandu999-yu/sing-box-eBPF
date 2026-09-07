@@ -307,11 +307,15 @@ jobs:
             release/completions/sing-box.zsh=/usr/share/zsh/site-functions/_sing-box \
             LICENSE=/usr/share/licenses/sing-box/LICENSE
           cd ..
-          rm -rf $HOME/.gnupg
-          gpg --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" --import <<EOF
-          ${{ secrets.GPG_KEY }}
-          EOF
-          debsigs --sign=origin -k ${{ secrets.GPG_KEY_ID }} --gpgopts '--pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}"' dist/*.deb
+          if [ -n "${{ secrets.GPG_KEY }}" ] && [ -n "${{ secrets.GPG_KEY_ID }}" ] && [ -n "${{ secrets.GPG_PASSPHRASE }}" ]; then
+            rm -rf $HOME/.gnupg
+            gpg --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" --import <<EOF
+            ${{ secrets.GPG_KEY }}
+            EOF
+            debsigs --sign=origin -k ${{ secrets.GPG_KEY_ID }} --gpgopts '--pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}"' dist/*.deb
+          else
+            echo "GPG secrets not set, skipping DEB signing"
+          fi
 
       - name: Package RPM
         if: matrix.rpm != ''
@@ -337,14 +341,18 @@ jobs:
             release/completions/sing-box.zsh=/usr/share/zsh/site-functions/_sing-box \
             LICENSE=/usr/share/licenses/sing-box/LICENSE
           cd ..
-          cat > $HOME/.rpmmacros <<EOF
-          %_gpg_name ${{ secrets.GPG_KEY_ID }}
-          %_gpg_sign_cmd_extra_args --pinentry-mode loopback --passphrase ${{ secrets.GPG_PASSPHRASE }}
-          EOF
-          gpg --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" --import <<EOF
-          ${{ secrets.GPG_KEY }}
-          EOF
-          rpmsign --addsign dist/*.rpm
+          if [ -n "${{ secrets.GPG_KEY }}" ] && [ -n "${{ secrets.GPG_KEY_ID }}" ] && [ -n "${{ secrets.GPG_PASSPHRASE }}" ]; then
+            cat > $HOME/.rpmmacros <<EOF
+            %_gpg_name ${{ secrets.GPG_KEY_ID }}
+            %_gpg_sign_cmd_extra_args --pinentry-mode loopback --passphrase ${{ secrets.GPG_PASSPHRASE }}
+            EOF
+            gpg --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" --import <<EOF
+            ${{ secrets.GPG_KEY }}
+            EOF
+            rpmsign --addsign dist/*.rpm
+          else
+            echo "GPG secrets not set, skipping RPM signing"
+          fi
 
       - name: Package Pacman
         if: matrix.pacman != ''
