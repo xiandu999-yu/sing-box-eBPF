@@ -1,4 +1,4 @@
-name: Build (eBPF-enabled from CHIZI-0618/sing-box)
+name: Build (eBPF-enabled from reF1nd/sing-box)
 
 on:
   workflow_dispatch:
@@ -34,7 +34,7 @@ env:
 jobs:
   # ==================== Linux 二进制构建（从外部仓库） ====================
   build-linux:
-    name: Build Linux binaries (from CHIZI-0618/sing-box)
+    name: Build Linux binaries (from reF1nd/sing-box)
     if: github.event_name != 'workflow_dispatch' || inputs.build == 'All' || inputs.build == 'Binary' || inputs.build == 'Linux'
     runs-on: ubuntu-26.04
     strategy:
@@ -100,10 +100,10 @@ jobs:
           key: go-mod-linux-${{ hashFiles('go.sum') }}
           restore-keys: go-mod-linux-
 
-      - name: Clone external repository (CHIZI-0618/sing-box)
+      - name: Clone external repository (reF1nd/sing-box)
         run: |
           set -eux
-          git clone --filter=blob:none --no-checkout https://github.com/CHIZI-0618/sing-box repo
+          git clone --filter=blob:none --no-checkout https://github.com/reF1nd/sing-box repo
           git -C repo checkout "$SING_BOX_COMMIT"
           git -C repo submodule update --init --recursive || true
 
@@ -491,10 +491,10 @@ jobs:
           key: go-mod-linux-${{ hashFiles('go.sum') }}
           restore-keys: go-mod-linux-
 
-      - name: Clone external repository (CHIZI-0618/sing-box)
+      - name: Clone external repository (reF1nd/sing-box)
         run: |
           set -eux
-          git clone --filter=blob:none --no-checkout https://github.com/CHIZI-0618/sing-box repo
+          git clone --filter=blob:none --no-checkout https://github.com/reF1nd/sing-box repo
           git -C repo checkout "$SING_BOX_COMMIT"
           git -C repo submodule update --init --recursive || true
 
@@ -654,16 +654,17 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: |
           cd repo
-          # Stash any uncommitted changes to make the workspace clean
-          git stash push -u -m "stash before update_version" || true
-          go run -v ./cmd/internal/update_android_version --ci
+          go run -v ./cmd/internal/update_android_version --ci || true
+          git add clients/android/version.properties
+          git commit -m "Update version" --allow-empty
 
       - name: Update nightly version (for push)
         if: github.event_name != 'workflow_dispatch'
         run: |
           cd repo
-          git stash push -u -m "stash before update_version" || true
-          go run -v ./cmd/internal/update_android_version --ci --nightly
+          go run -v ./cmd/internal/update_android_version --ci --nightly || true
+          git add clients/android/version.properties
+          git commit -m "Update version" --allow-empty
 
       - name: Build
         run: |
@@ -716,10 +717,10 @@ jobs:
           fi
           cat ci/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
 
-      - name: Clone external repository (CHIZI-0618/sing-box)
+      - name: Clone external repository (reF1nd/sing-box)
         run: |
           set -eux
-          git clone --filter=blob:none --no-checkout https://github.com/CHIZI-0618/sing-box repo
+          git clone --filter=blob:none --no-checkout https://github.com/reF1nd/sing-box repo
           git -C repo checkout "$SING_BOX_COMMIT"
           git -C repo submodule update --init --recursive || true
 
