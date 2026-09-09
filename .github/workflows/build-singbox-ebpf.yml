@@ -1,4 +1,4 @@
-name: Build (eBPF-enabled from reF1nd/sing-box)
+name: Build (eBPF-enabled from CHIZI-0618/sing-box)
 
 on:
   workflow_dispatch:
@@ -33,7 +33,7 @@ env:
 jobs:
   # ==================== Linux 二进制构建（从外部仓库） ====================
   build-linux:
-    name: Build Linux binaries (from reF1nd/sing-box)
+    name: Build Linux binaries (from CHIZI-0618/sing-box)
     if: github.event_name != 'workflow_dispatch' || inputs.build == 'All' || inputs.build == 'Binary' || inputs.build == 'Linux'
     runs-on: ubuntu-26.04
     strategy:
@@ -99,10 +99,10 @@ jobs:
           key: go-mod-linux-${{ hashFiles('go.sum') }}
           restore-keys: go-mod-linux-
 
-      - name: Clone external repository (reF1nd/sing-box)
+      - name: Clone external repository (CHIZI-0618/sing-box)
         run: |
           set -eux
-          git clone --filter=blob:none --no-checkout https://github.com/reF1nd/sing-box repo
+          git clone --filter=blob:none --no-checkout https://github.com/CHIZI-0618/sing-box repo
           git -C repo checkout "$SING_BOX_COMMIT"
           git -C repo submodule update --init --recursive || true
 
@@ -448,9 +448,9 @@ jobs:
           name: binary-linux_${{ matrix.arch }}${{ matrix.goarm && format('v{0}', matrix.goarm) }}${{ matrix.go386 && format('_{0}', matrix.go386) }}${{ matrix.gomips && format('_{0}', matrix.gomips) }}${{ matrix.variant && format('-{0}', matrix.variant) }}
           path: "dist"
 
-  # ==================== Android 库构建（从 reF1nd/sing-box） ====================
+  # ==================== Android 库构建（从 CHIZI-0618/sing-box） ====================
   build-android-lib:
-    name: Build Android library (${{ matrix.go_arch }}) from reF1nd/sing-box
+    name: Build Android library (${{ matrix.go_arch }}) from CHIZI-0618/sing-box
     if: |
       (github.event_name == 'push' && (github.ref == 'refs/heads/stable' || github.ref == 'refs/heads/testing')) ||
       (github.event_name == 'workflow_dispatch' && (inputs.build == 'All' || inputs.build == 'Android'))
@@ -490,10 +490,10 @@ jobs:
           key: go-mod-linux-${{ hashFiles('go.sum') }}
           restore-keys: go-mod-linux-
 
-      - name: Clone external repository (reF1nd/sing-box)
+      - name: Clone external repository (CHIZI-0618/sing-box)
         run: |
           set -eux
-          git clone --filter=blob:none --no-checkout https://github.com/reF1nd/sing-box repo
+          git clone --filter=blob:none --no-checkout https://github.com/CHIZI-0618/sing-box repo
           git -C repo checkout "$SING_BOX_COMMIT"
           git -C repo submodule update --init --recursive || true
 
@@ -618,7 +618,7 @@ jobs:
       - name: Merge libraries
         run: |
           set -eux
-          git clone --filter=blob:none --depth 1 --no-checkout https://github.com/reF1nd/sing-box tmp-repo
+          git clone --filter=blob:none --depth 1 --no-checkout https://github.com/CHIZI-0618/sing-box tmp-repo
           git -C tmp-repo checkout "$SING_BOX_COMMIT"
           cd tmp-repo
           go run ./cmd/internal/merge_aar -output ../libbox.aar ../libbox-inputs/*/libbox.aar
