@@ -286,6 +286,46 @@ jobs:
           # OpenWrt APK 版本：直接使用 ci/pins.env 中定义的 OPENWRT_VERSION
           echo "OPENWRT_VERSION=${{ env.OPENWRT_VERSION }}" >> "${GITHUB_ENV}"
 
+      # ===== 方案 A：补齐 reF1nd/sing-box 固定 commit 中缺失的打包文件 =====
+      # 目前已知缺失：release/config/sing-box.sysusers
+      # 同时输出所有 fpm 引用文件的存在状态，便于后续定位其他缺失项。
+      - name: Ensure release packaging files exist
+        if: ${{ matrix.debian != '' || matrix.rpm != '' || matrix.pacman != '' }}
+        run: |
+          set -xeuo pipefail
+          cd repo
+
+          # 补齐 systemd sysusers 文件（SagerNet/sing-box 标准内容）
+          if [[ ! -f release/config/sing-box.sysusers ]]; then
+            mkdir -p release/config
+            printf '%s\n' 'u sing-box - "sing-box service" /var/lib/sing-box' \
+              > release/config/sing-box.sysusers
+            echo "Created release/config/sing-box.sysusers"
+          else
+            echo "release/config/sing-box.sysusers already present"
+          fi
+
+          # 诊断：列出 fpm 引用的所有文件状态
+          echo "=== fpm referenced files ==="
+          for f in \
+            release/config/config.json \
+            release/config/sing-box.service \
+            release/config/sing-box@.service \
+            release/config/sing-box.sysusers \
+            release/config/sing-box.rules \
+            release/config/sing-box-split-dns.xml \
+            release/completions/sing-box.bash \
+            release/completions/sing-box.fish \
+            release/completions/sing-box.zsh \
+            LICENSE
+          do
+            if [[ -f "$f" ]]; then
+              echo "OK   $f"
+            else
+              echo "MISS $f"
+            fi
+          done
+
       - name: Package DEB
         if: matrix.debian != ''
         run: |
@@ -294,21 +334,35 @@ jobs:
           sudo gem install fpm
           sudo apt-get install -y debsigs
           cp .fpm_systemd .fpm
-          fpm -t deb \
-            -v "$PKG_VERSION" \
-            -p "../dist/sing-box_${{ env.SING_BOX_VERSION }}_linux_${{ matrix.debian }}.deb" \
-            --architecture ${{ matrix.debian }} \
-            ../dist/sing-box=/usr/bin/sing-box \
-            release/config/config.json=/etc/sing-box/config.json \
-            release/config/sing-box.service=/usr/lib/systemd/system/sing-box.service \
-            release/config/sing-box@.service=/usr/lib/systemd/system/sing-box@.service \
-            release/config/sing-box.sysusers=/usr/lib/sysusers.d/sing-box.conf \
-            release/config/sing-box.rules=usr/share/polkit-1/rules.d/sing-box.rules \
-            release/config/sing-box-split-dns.xml=/usr/share/dbus-1/system.d/sing-box-split-dns.conf \
-            release/completions/sing-box.bash=/usr/share/bash-completion/completions/sing-box.bash \
-            release/completions/sing-box.fish=/usr/share/fish/vendor_completions.d/sing-box.fish \
-            release/completions/sing-box.zsh=/usr/share/zsh/site-functions/_sing-box \
-            LICENSE=/usr/share/licenses/sing-box/LICENSE
+
+          # 构建 fpm 参数：仅加入实际存在的文件，缺失项记录 WARN 而不中断
+          FPM_ARGS=(
+            -t deb
+            -v "$PKG_VERSION"
+            -p "../dist/sing-box_${{ env.SING_BOX_VERSION }}_linux_${{ matrix.debian }}.deb"
+            --architecture "${{ matrix.debian }}"
+          )
+          for pair in \
+            "../dist/sing-box:/usr/bin/sing-box" \
+            "release/config/config.json:/etc/sing-box/config.json" \
+            "release/config/sing-box.service:/usr/lib/systemd/system/sing-box.service" \
+            "release/config/sing-box@.service:/usr/lib/systemd/system/sing-box@.service" \
+            "release/config/sing-box.sysusers:/usr/lib/sysusers.d/sing-box.conf" \
+            "release/config/sing-box.rules:usr/share/polkit-1/rules.d/sing-box.rules" \
+            "release/config/sing-box-split-dns.xml:/usr/share/dbus-1/system.d/sing-box-split-dns.conf" \
+            "release/completions/sing-box.bash:/usr/share/bash-completion/completions/sing-box.bash" \
+            "release/completions/sing-box.fish:/usr/share/fish/vendor_completions.d/sing-box.fish" \
+            "release/completions/sing-box.zsh:/usr/share/zsh/site-functions/_sing-box" \
+            "LICENSE:/usr/share/licenses/sing-box/LICENSE"
+          do
+            src="${pair%%:*}"; dst="${pair#*:}"
+            if [[ -f "$src" ]]; then
+              FPM_ARGS+=("$src=$dst")
+            else
+              echo "WARN: skip missing $src"
+            fi
+          done
+          fpm "${FPM_ARGS[@]}"
           cd ..
           if [ -n "${{ secrets.GPG_KEY }}" ] && [ -n "${{ secrets.GPG_KEY_ID }}" ] && [ -n "${{ secrets.GPG_PASSPHRASE }}" ]; then
             rm -rf $HOME/.gnupg
@@ -326,21 +380,34 @@ jobs:
           sudo gem install fpm
           echo '%_rpmformat 4' > "$HOME/.rpmmacros"
           cp .fpm_systemd .fpm
-          fpm -t rpm \
-            -v "$PKG_VERSION" \
-            -p "../dist/sing-box_${{ env.SING_BOX_VERSION }}_linux_${{ matrix.rpm }}.rpm" \
-            --architecture ${{ matrix.rpm }} \
-            ../dist/sing-box=/usr/bin/sing-box \
-            release/config/config.json=/etc/sing-box/config.json \
-            release/config/sing-box.service=/usr/lib/systemd/system/sing-box.service \
-            release/config/sing-box@.service=/usr/lib/systemd/system/sing-box@.service \
-            release/config/sing-box.sysusers=/usr/lib/sysusers.d/sing-box.conf \
-            release/config/sing-box.rules=usr/share/polkit-1/rules.d/sing-box.rules \
-            release/config/sing-box-split-dns.xml=/usr/share/dbus-1/system.d/sing-box-split-dns.conf \
-            release/completions/sing-box.bash=/usr/share/bash-completion/completions/sing-box.bash \
-            release/completions/sing-box.fish=/usr/share/fish/vendor_completions.d/sing-box.fish \
-            release/completions/sing-box.zsh=/usr/share/zsh/site-functions/_sing-box \
-            LICENSE=/usr/share/licenses/sing-box/LICENSE
+
+          FPM_ARGS=(
+            -t rpm
+            -v "$PKG_VERSION"
+            -p "../dist/sing-box_${{ env.SING_BOX_VERSION }}_linux_${{ matrix.rpm }}.rpm"
+            --architecture "${{ matrix.rpm }}"
+          )
+          for pair in \
+            "../dist/sing-box:/usr/bin/sing-box" \
+            "release/config/config.json:/etc/sing-box/config.json" \
+            "release/config/sing-box.service:/usr/lib/systemd/system/sing-box.service" \
+            "release/config/sing-box@.service:/usr/lib/systemd/system/sing-box@.service" \
+            "release/config/sing-box.sysusers:/usr/lib/sysusers.d/sing-box.conf" \
+            "release/config/sing-box.rules:usr/share/polkit-1/rules.d/sing-box.rules" \
+            "release/config/sing-box-split-dns.xml:/usr/share/dbus-1/system.d/sing-box-split-dns.conf" \
+            "release/completions/sing-box.bash:/usr/share/bash-completion/completions/sing-box.bash" \
+            "release/completions/sing-box.fish:/usr/share/fish/vendor_completions.d/sing-box.fish" \
+            "release/completions/sing-box.zsh:/usr/share/zsh/site-functions/_sing-box" \
+            "LICENSE:/usr/share/licenses/sing-box/LICENSE"
+          do
+            src="${pair%%:*}"; dst="${pair#*:}"
+            if [[ -f "$src" ]]; then
+              FPM_ARGS+=("$src=$dst")
+            else
+              echo "WARN: skip missing $src"
+            fi
+          done
+          fpm "${FPM_ARGS[@]}"
           cd ..
           if [ -n "${{ secrets.GPG_KEY }}" ] && [ -n "${{ secrets.GPG_KEY_ID }}" ] && [ -n "${{ secrets.GPG_PASSPHRASE }}" ]; then
             printf '%%_gpg_name %s\n%%_gpg_sign_cmd_extra_args --pinentry-mode loopback --passphrase %s\n' "${{ secrets.GPG_KEY_ID }}" "${{ secrets.GPG_PASSPHRASE }}" > $HOME/.rpmmacros
@@ -359,21 +426,34 @@ jobs:
           sudo apt-get update || true
           sudo apt-get install -y libarchive-tools
           cp .fpm_pacman .fpm
-          fpm -t pacman \
-            -v "$PKG_VERSION" \
-            -p "../dist/sing-box_${{ env.SING_BOX_VERSION }}_linux_${{ matrix.pacman }}.pkg.tar.zst" \
-            --architecture ${{ matrix.pacman }} \
-            ../dist/sing-box=/usr/bin/sing-box \
-            release/config/config.json=/etc/sing-box/config.json \
-            release/config/sing-box.service=/usr/lib/systemd/system/sing-box.service \
-            release/config/sing-box@.service=/usr/lib/systemd/system/sing-box@.service \
-            release/config/sing-box.sysusers=/usr/lib/sysusers.d/sing-box.conf \
-            release/config/sing-box.rules=usr/share/polkit-1/rules.d/sing-box.rules \
-            release/config/sing-box-split-dns.xml=/usr/share/dbus-1/system.d/sing-box-split-dns.conf \
-            release/completions/sing-box.bash=/usr/share/bash-completion/completions/sing-box.bash \
-            release/completions/sing-box.fish=/usr/share/fish/vendor_completions.d/sing-box.fish \
-            release/completions/sing-box.zsh=/usr/share/zsh/site-functions/_sing-box \
-            LICENSE=/usr/share/licenses/sing-box/LICENSE
+
+          FPM_ARGS=(
+            -t pacman
+            -v "$PKG_VERSION"
+            -p "../dist/sing-box_${{ env.SING_BOX_VERSION }}_linux_${{ matrix.pacman }}.pkg.tar.zst"
+            --architecture "${{ matrix.pacman }}"
+          )
+          for pair in \
+            "../dist/sing-box:/usr/bin/sing-box" \
+            "release/config/config.json:/etc/sing-box/config.json" \
+            "release/config/sing-box.service:/usr/lib/systemd/system/sing-box.service" \
+            "release/config/sing-box@.service:/usr/lib/systemd/system/sing-box@.service" \
+            "release/config/sing-box.sysusers:/usr/lib/sysusers.d/sing-box.conf" \
+            "release/config/sing-box.rules:usr/share/polkit-1/rules.d/sing-box.rules" \
+            "release/config/sing-box-split-dns.xml:/usr/share/dbus-1/system.d/sing-box-split-dns.conf" \
+            "release/completions/sing-box.bash:/usr/share/bash-completion/completions/sing-box.bash" \
+            "release/completions/sing-box.fish:/usr/share/fish/vendor_completions.d/sing-box.fish" \
+            "release/completions/sing-box.zsh:/usr/share/zsh/site-functions/_sing-box" \
+            "LICENSE:/usr/share/licenses/sing-box/LICENSE"
+          do
+            src="${pair%%:*}"; dst="${pair#*:}"
+            if [[ -f "$src" ]]; then
+              FPM_ARGS+=("$src=$dst")
+            else
+              echo "WARN: skip missing $src"
+            fi
+          done
+          fpm "${FPM_ARGS[@]}"
           cd ..
 
       - name: Package OpenWrt
