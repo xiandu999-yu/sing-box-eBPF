@@ -204,8 +204,21 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
+          set -euo pipefail
+          before=$(sha256sum internal/bpfgen/tc_bpfel.o | cut -d' ' -f1)
+          echo "before: ${before}"
           make generate
-          git status --short 2>/dev/null || true
+          after=$(sha256sum internal/bpfgen/tc_bpfel.o | cut -d' ' -f1)
+          echo "after:  ${after}"
+          echo "--- bpfgen status (may be empty when generation is a no-op)"
+          git status --short -- internal/bpfgen || true
+          native_changed="$(git diff --name-only -- native | head -n 1 || true)"
+          if [ -z "${native_changed}" ]; then
+            echo "native sources unchanged: generation no-op is expected"
+          elif [ "${before}" = "${after}" ]; then
+            echo "::error::native sources changed but tc_bpfel.o did not; generation is ineffective"
+            exit 1
+          fi
 
       - name: Pack prepared source
         shell: bash
