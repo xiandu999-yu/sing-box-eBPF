@@ -4,18 +4,17 @@ name: Build
 #   * CLI 二进制压缩包：仅 Linux（eBPF 只在 Linux 上可用，macOS/Windows 不再构建）
 #   * OpenWrt 安装包：.ipk / .apk
 #
-# 编译前按文件名顺序套用补丁（目录不存在或为空则跳过）：
-#   patches/sing-box/*.patch        -> sing-box 本体（patches/*.patch 仍兼容）
-#   patches/modules/<name>/*.patch  -> 依赖的 Go 模块（如 sing-ebpf）：
-#                                      直接克隆模块仓库（pin.env 里的 MODULE_REF
-#                                      可以是分支/tag/commit），打补丁后
-#                                      go mod edit -replace 接进构建；
-#                                      没有 pin.env 才回退到 go.mod 的伪版本
-# 具体逻辑见 .github/scripts/apply-patches.sh。
-# 补丁内容与配置说明见 patches/CHANGES.md。
+# 流程分两段：
+#   prepare —— 克隆源码、套补丁、用 NDK r29 生成 eBPF 对象，打包成 prepared-src
+#   build   —— 下载 prepared-src 直接编译，不再各自打补丁
 #
-# 改编自 sing-box 官方 .github/workflows/build.yml，去掉了 Android/iOS/macOS
-# 客户端、桌面客户端、deb/rpm/pacman 打包以及 cronet(naive) 工具链。
+# 这样补丁里不需要携带预生成的 .o（二进制 hunk 容易与应用环境不一致），
+# 每次构建的对象都由当次源码现场生成，源码和对象永远不会错位。
+#
+# 补丁目录（不存在或为空则跳过）：
+#   patches/sing-box/*.patch        -> sing-box 本体（patches/*.patch 仍兼容）
+#   patches/modules/<name>/*.patch  -> 依赖的 Go 模块（如 sing-ebpf）
+# 具体逻辑见 .github/scripts/apply-patches.sh，补丁说明见 patches/CHANGES.md。
 
 on:
   workflow_dispatch:
@@ -136,6 +135,11 @@ jobs:
             else
               printf '  - %s\n' "${patch_files[@]}"
             fi
+            echo
+            echo "patch sha256:"
+            if [ ${#patch_files[@]} -gt 0 ]; then
+              sha256sum "${patch_files[@]}" | sed 's/^/  /'
+            fi
           } > build-info.txt
           cat build-info.txt
 
@@ -146,10 +150,11 @@ jobs:
           path: build-info.txt
           retention-days: 7
 
-  test:
-    name: Delivery tests
+  # 唯一的「准备」阶段：套补丁 + 生成 eBPF 对象 + 打包，供后续 job 复用
+  prepare:
+    name: Prepare source
     runs-on: ubuntu-26.04
-    timeout-minutes: 20
+    timeout-minutes: 40
     needs:
       - version
     steps:
@@ -170,14 +175,78 @@ jobs:
           cache: true
           cache-dependency-path: src/go.sum
 
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r29
+          add-to-path: false
+
+      # 防止补丁放错目录时静默跳过，导致用原版代码构建
+      - name: Verify patches present
+        shell: bash
+        run: |
+          set -euo pipefail
+          box=$(find patches/sing-box -name '*.patch' 2>/dev/null | wc -l)
+          mod=$(find patches/modules -name '*.patch' 2>/dev/null | wc -l)
+          echo "sing-box patches: ${box}, module patches: ${mod}"
+          [ "${box}" -gt 0 ] || { echo "::error::no sing-box patch found under patches/sing-box"; exit 1; }
+          [ "${mod}" -gt 0 ] || { echo "::error::no module patch found under patches/modules"; exit 1; }
+
       - name: Apply patches
         shell: bash
-        working-directory: ${{ github.workspace }}
         run: |
           sed -i 's/\r$//' .github/scripts/apply-patches.sh
           bash .github/scripts/apply-patches.sh src
 
-      # 需要 root：在临时 netns 之外建一次 sb-netkit-* 再删掉。
+      - name: Generate BPF objects
+        working-directory: ${{ github.workspace }}/modules/sing-ebpf
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          make generate
+          git status --short 2>/dev/null || true
+
+      - name: Pack prepared source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf prepared-src.tgz src modules
+          ls -lh prepared-src.tgz
+
+      - name: Upload prepared source
+        uses: actions/upload-artifact@v6
+        with:
+          name: prepared-src
+          path: prepared-src.tgz
+          retention-days: 7
+          compression-level: 0
+
+  test:
+    name: Delivery tests
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    needs:
+      - prepare
+    steps:
+      - name: Download prepared source
+        uses: actions/download-artifact@v6
+        with:
+          name: prepared-src
+          path: ${{ github.workspace }}
+
+      - name: Extract
+        shell: bash
+        run: tar -xzf prepared-src.tgz
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: src/go.mod
+          cache: true
+          cache-dependency-path: src/go.sum
+
+      # 需要 root：建一次 sb-netkit-* 再删掉。
       - name: Delivery integration tests
         shell: bash
         working-directory: ${{ github.workspace }}/modules/sing-ebpf
@@ -191,6 +260,7 @@ jobs:
     timeout-minutes: 60
     needs:
       - version
+      - prepare
     defaults:
       run:
         working-directory: src
@@ -217,15 +287,16 @@ jobs:
           - { goarch: arm, goarm: "5", openwrt: "arm_arm926ej-s arm_cortex-a7 arm_cortex-a9 arm_fa526 arm_xscale" }
           - { goarch: arm, goarm: "6", openwrt: "arm_arm1176jzf-s_vfp" }
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Checkout sing-box
-        uses: actions/checkout@v6
+      - name: Download prepared source
+        uses: actions/download-artifact@v6
         with:
-          repository: ${{ needs.version.outputs.repository }}
-          ref: ${{ needs.version.outputs.commit }}
-          path: src
-          fetch-depth: 1
+          name: prepared-src
+          path: ${{ github.workspace }}
+
+      - name: Extract
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: tar -xzf prepared-src.tgz
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -233,14 +304,6 @@ jobs:
           go-version-file: src/go.mod
           cache: true
           cache-dependency-path: src/go.sum
-
-      - name: Apply patches
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: |
-          # 仓库里可能残留 CRLF，先去掉再执行，否则 bash 会因为 \r 报错
-          sed -i 's/\r$//' .github/scripts/apply-patches.sh
-          bash .github/scripts/apply-patches.sh src
 
       - name: Build
         run: |

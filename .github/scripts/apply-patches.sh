@@ -141,7 +141,9 @@ if [ -d "$ROOT/patches/modules" ]; then
 
 		apply_patches "$module_dir" "$name" "${files[@]}"
 
-		( cd "$SRC_ABS" && go mod edit -replace "$module_path=$module_dir" )
+		# 用相对路径：prepare 阶段打包后会在另一个 runner 上解压，绝对路径会失效
+  module_rel="$(realpath --relative-to="$SRC_ABS" "$module_dir")"
+  ( cd "$SRC_ABS" && go mod edit -replace "$module_path=$module_rel" )
 		echo "replaced $module_path => $module_dir ($full_sha)"
 	done
 fi
