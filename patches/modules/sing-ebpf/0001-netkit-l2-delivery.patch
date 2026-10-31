@@ -75,7 +75,7 @@ index 8c4079d..ec95418 100644
  	RequiresRebuild        bool
  }
 diff --git a/internal/core/tc.go b/internal/core/tc.go
-index 3ec9cae..56a5cc8 100644
+index 3ec9cae..638028b 100644
 --- a/internal/core/tc.go
 +++ b/internal/core/tc.go
 @@ -101,6 +101,12 @@ type TCConfig struct {
@@ -133,14 +133,12 @@ index 3ec9cae..56a5cc8 100644
  		selfMapExternal:    config.EnableLocal && config.SelfBypassMap != nil,
  	}
  	// From here, backend owns maps and loadedPrograms: giving up on either of the
-@@ -426,12 +443,17 @@ func loadTCResources(config TCConfig, baseOverrides map[string]mapSpecOverride,
+@@ -426,12 +443,15 @@ func loadTCResources(config TCConfig, baseOverrides map[string]mapSpecOverride,
  		programIndexes = append(programIndexes, tcProgramSharedIngressEthernet, tcProgramSharedIngressRawIP)
  	}
  	delivery := "classifier/isolated_delivery"
 +	returnSection := "classifier/isolated_return"
 +	if config.Delivery == "netkit-l3" {
-+		delivery += "_l3"
-+		returnSection += "_l3"
 +	}
  	if !config.EnableTCP {
  		delivery += "_udp"
@@ -152,7 +150,7 @@ index 3ec9cae..56a5cc8 100644
  	programIndexes = append(programIndexes, tcProgramDeliveryIngress, tcProgramIsolatedReturn)
  	loadedPrograms, err := loadObjectPrograms(loadTC, maps, selections)
  	if err != nil {
-@@ -639,7 +661,11 @@ func (b *TCBackend) useDirectTCPListenersLocked() error {
+@@ -639,7 +659,11 @@ func (b *TCBackend) useDirectTCPListenersLocked() error {
  			selections = append(selections, programSelection{section: section, kernelProgramName: name})
  		}
  	}
@@ -165,7 +163,7 @@ index 3ec9cae..56a5cc8 100644
  	programs, err := loadObjectPrograms(loadTC, b.runtime.maps, selections)
  	if err != nil {
  		return err
-@@ -1111,6 +1137,12 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
+@@ -1111,6 +1135,12 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
  	}
  }
  
@@ -276,23 +274,24 @@ index a898f01..3bd9336 100644
      __u32 tuple_size, __u64 netns, __u64 flags) = (void *)BPF_FUNC_skc_lookup_tcp;
  static struct bpf_sock *(*sk_lookup_udp)(void *ctx, struct bpf_sock_tuple *tuple,
 diff --git a/native/tc_isolation.h b/native/tc_isolation.h
-index 5cccc00..01919ad 100644
+index 5cccc00..03fb5e2 100644
 --- a/native/tc_isolation.h
 +++ b/native/tc_isolation.h
-@@ -64,7 +64,11 @@ INLINE __u32 assignment_record(const struct sb_tc_assign_key *flow, __u8 tcp_fla
+@@ -64,7 +64,12 @@ INLINE __u32 assignment_record(const struct sb_tc_assign_key *flow, __u8 tcp_fla
  }
  
  INLINE int deliver_isolated(struct __sk_buff *skb, const struct sb_tc_control *control, bool ethernet) {
 -    if (ethernet) {
 +    increment_stat(SB_TC_STAT_DELIVERY_ENTER);
 +    if (control->delivery_mode != 0U) {
-+        if (skb_adjust_room(skb, -(int)sizeof(struct ethernet_header), BPF_ADJ_ROOM_MAC, 0U) != 0) return TC_ACT_SHOT;
++        // L3: the kernel netkit handles the L2 boundary itself, so the frame is
++        // redirected untouched (no header stripping, no MAC rewrite).
 +        increment_stat(SB_TC_STAT_DELIVERY_STRIPPED);
 +    } else if (ethernet) {
          if (skb_store_bytes(skb, 0U, control->delivery_mac, 6U, 0U) != 0) return TC_ACT_SHOT;
      } else {
          struct ethernet_header header = {.protocol = skb->protocol};
-@@ -80,6 +84,7 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
+@@ -80,6 +85,7 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
      const struct sb_tc_assign_key *flow, __u64 cookie, __u32 flags) {
      bool record = (flags & SB_TC_REDIRECT_RECORD) != 0U;
      flags &= ~SB_TC_REDIRECT_RECORD;
@@ -300,7 +299,7 @@ index 5cccc00..01919ad 100644
      bool ethernet = (flags & SB_TC_RETURN_ETHERNET) != 0U;
      __u8 path = flags & 0xffU;
      __u64 now = ktime_get_ns();
-@@ -133,14 +138,14 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
+@@ -133,14 +139,14 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
      return deliver_isolated(skb, control, ethernet);
  }
  
@@ -317,7 +316,7 @@ index 5cccc00..01919ad 100644
      struct bpf_sock *socket;
      if (!udp_only && flow.protocol == IPPROTO_TCP_VALUE) {
          socket = legacy ? lookup_tcp_socket_legacy(skb, control, &flow) : lookup_tcp_socket(skb, &flow);
-@@ -174,14 +179,22 @@ INLINE int isolated_delivery(struct __sk_buff *skb, bool legacy, bool udp_only)
+@@ -174,14 +180,22 @@ INLINE int isolated_delivery(struct __sk_buff *skb, bool legacy, bool udp_only)
  }
  
  SEC("classifier/isolated_delivery")
@@ -345,7 +344,7 @@ index 5cccc00..01919ad 100644
      const struct sb_tc_control *control = load_control();
      if (control == 0 || control->enabled == 0U) return TC_ACT_SHOT;
      struct sb_tc_assign_key flow;
-@@ -191,7 +204,21 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
+@@ -191,7 +205,21 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
      void *end = (void *)(long)skb->data_end;
      __u16 protocol;
      __u32 offset;
@@ -368,7 +367,7 @@ index 5cccc00..01919ad 100644
      if (protocol == ETH_P_IP_VALUE) {
          if (fill_ipv4_key(data, end, offset, control, &flow, &fragment, 0) != SB_TC_PARSE_FLOW) return TC_ACT_SHOT;
      } else if (protocol == ETH_P_IPV6_VALUE) {
-@@ -232,3 +259,8 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
+@@ -232,3 +260,8 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
      skb->mark = 0U;
      return redirect(value.ifindex, (value.flags & 0xffU) == SB_TC_PATH_DELIVERY ? BPF_F_INGRESS : 0U);
  }
