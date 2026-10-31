@@ -7,8 +7,10 @@ name: Build
 # 编译前按文件名顺序套用补丁（目录不存在或为空则跳过）：
 #   patches/sing-box/*.patch        -> sing-box 本体（patches/*.patch 仍兼容）
 #   patches/modules/<name>/*.patch  -> 依赖的 Go 模块（如 sing-ebpf）：
-#                                      按 go.mod 的 require/replace 找到仓库与
-#                                      commit，克隆后打补丁并 go mod edit -replace
+#                                      直接克隆模块仓库（pin.env 里的 MODULE_REF
+#                                      可以是分支/tag/commit），打补丁后
+#                                      go mod edit -replace 接进构建；
+#                                      没有 pin.env 才回退到 go.mod 的伪版本
 # 具体逻辑见 .github/scripts/apply-patches.sh。
 #
 # 改编自 sing-box 官方 .github/workflows/build.yml，去掉了 Android/iOS/macOS
