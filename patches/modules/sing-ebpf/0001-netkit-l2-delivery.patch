@@ -1,0 +1,222 @@
+diff --git a/api.go b/api.go
+index cdf7c4b..70302f8 100644
+--- a/api.go
++++ b/api.go
+@@ -250,6 +250,9 @@ type TCConfig struct {
+ 	EnableTCP          bool
+ 	EnableUDP          bool
+ 	DeliveryInterface  uint32
++	// Delivery selects the socket-assignment delivery link: "" or "veth"
++	// (default) keeps the veth pair, "netkit" uses a netkit pair in L2 mode.
++	Delivery           string
+ 	Policy             CompiledPolicy
+ 	RoutingMark        uint32
+ 	SelfBypass         *SelfBypass
+@@ -273,6 +276,7 @@ func PrepareTC(config TCConfig) (*TCBackend, error) {
+ 		EnableTCP:          config.EnableTCP,
+ 		EnableUDP:          config.EnableUDP,
+ 		DeliveryInterface:  config.DeliveryInterface,
++		Delivery:           config.Delivery,
+ 		Policy:             config.Policy,
+ 		RoutingMark:        config.RoutingMark,
+ 		TrackProcess:       config.TrackProcess,
+diff --git a/internal/core/access.go b/internal/core/access.go
+index 711519b..6c71969 100644
+--- a/internal/core/access.go
++++ b/internal/core/access.go
+@@ -73,6 +73,14 @@ func NewTCBackendHandle(backend *TCBackend) TCBackendHandle {
+ 	return TCBackendHandle{backend: backend}
+ }
+ 
++// DeliveryKind reports the requested socket-assignment delivery link kind.
++func (h TCBackendHandle) DeliveryKind() string {
++	if h.backend == nil {
++		return ""
++	}
++	return h.backend.delivery
++}
++
+ func (h TCBackendHandle) tcBackend() *TCBackend {
+ 	return h.backend
+ }
+diff --git a/internal/core/tc.go b/internal/core/tc.go
+index 3ec9cae..29ea50b 100644
+--- a/internal/core/tc.go
++++ b/internal/core/tc.go
+@@ -101,6 +101,7 @@ type TCConfig struct {
+ 	EnableTCP          bool
+ 	EnableUDP          bool
+ 	DeliveryInterface  uint32
++	Delivery           string
+ 	Policy             CompiledPolicy
+ 	RoutingMark        uint32
+ 	SelfBypassMap      *CiliumEBPF.Map
+@@ -204,6 +205,7 @@ type TCBackend struct {
+ 	runtime                   *tcRuntime
+ 	tcpListenerMap            bool
+ 	programsExposed           bool
++	delivery                  string
+ 	control                   tcControl
+ 	controlMapFD              int
+ 	assignmentMapFD           int
+@@ -350,6 +352,7 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
+ 		controlMapFD:       maps["tc_control"].FD(),
+ 		assignmentMapFD:    maps["tc_assignment"].FD(),
+ 		assignmentCapacity: config.AssignmentCapacity,
++		delivery:           config.Delivery,
+ 		selfMapExternal:    config.EnableLocal && config.SelfBypassMap != nil,
+ 	}
+ 	// From here, backend owns maps and loadedPrograms: giving up on either of the
+diff --git a/runtime/tc_dataplane.go b/runtime/tc_dataplane.go
+index 31d06ac..6ca9c5d 100644
+--- a/runtime/tc_dataplane.go
++++ b/runtime/tc_dataplane.go
+@@ -124,6 +124,7 @@ type tcDataPlane struct {
+ 	replyMTU              int
+ 	access                sync.Mutex
+ 	backend               *commonEBPF.TCBackend
++	deliveryKind          string
+ 	routing               *tcPolicyRouting
+ 	delivery              *tcDeliveryLink
+ 	attachments           []*tcInterfaceAttachment
+@@ -211,6 +212,9 @@ func startTCDataPlane(
+ 	namespace *TCNamespace,
+ ) (*tcDataPlane, error) {
+ 	dataPlane := &tcDataPlane{backend: backend, sharedSourceMACPolicy: sharedSourceMACPolicy, priority: priority}
++	if backend != nil {
++		dataPlane.deliveryKind = backend.DeliveryKind()
++	}
+ 	dataPlane.namespace = namespace
+ 	dataPlane.enableIPv6 = enableIPv6
+ 	cleanup := func(startErr error) (*tcDataPlane, error) {
+diff --git a/runtime/tc_isolated_delivery.go b/runtime/tc_isolated_delivery.go
+index 335242f..005f9d7 100644
+--- a/runtime/tc_isolated_delivery.go
++++ b/runtime/tc_isolated_delivery.go
+@@ -69,18 +69,12 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+ 		n.access.RUnlock()
+ 		return nil, os.ErrClosed
+ 	}
+-	veth := &netlink.Veth{
+-		LinkAttrs:        netlink.LinkAttrs{Name: hostName, MTU: 65535, HardwareAddr: hostAddress},
+-		PeerName:         peerName,
+-		PeerHardwareAddr: peerAddress,
+-		PeerNamespace:    netlink.NsFd(n.handle),
+-	}
+-	err = netlink.LinkAdd(veth)
++	created, err := createTCDeliveryPair(d.deliveryKind, hostName, peerName, hostAddress, peerAddress, int(n.handle), tcDeliveryMTU)
+ 	n.access.RUnlock()
+ 	if err != nil {
+-		return nil, E.Cause(err, "create isolated TC veth (CONFIG_VETH and CAP_NET_ADMIN required)")
++		return nil, err
+ 	}
+-	owner := &tcDeliveryLink{namespace: n, redirectName: hostName, deliveryName: peerName, redirect: veth, enableIPv6: d.enableIPv6, replyMTU: d.replyMTU}
++	owner := &tcDeliveryLink{namespace: n, redirectName: hostName, deliveryName: peerName, redirect: created, enableIPv6: d.enableIPv6, replyMTU: d.replyMTU}
+ 	cleanup := func(cause error) (*tcDeliveryLink, error) {
+ 		err := E.Errors(cause, owner.Close())
+ 		if owner.IsClosed() {
+@@ -90,7 +84,7 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+ 	}
+ 	owner.redirect, err = d.linkByName()(hostName)
+ 	if err != nil {
+-		owner.redirect = veth
++		owner.redirect = created
+ 		return cleanup(E.Cause(err, "find TC eBPF redirect link"))
+ 	}
+ 	if err = netlink.LinkSetUp(owner.redirect); err != nil {
+diff --git a/runtime/tc_netkit.go b/runtime/tc_netkit.go
+new file mode 100644
+index 0000000..945e9ac
+--- /dev/null
++++ b/runtime/tc_netkit.go
+@@ -0,0 +1,90 @@
++//go:build with_ebpf && (linux || android)
++
++package runtime
++
++import (
++	"net"
++
++	"github.com/sagernet/netlink"
++	"github.com/sagernet/netlink/nl"
++	E "github.com/sagernet/sing/common/exceptions"
++	"golang.org/x/sys/unix"
++)
++
++// Delivery link kinds accepted by commonEBPF.TCConfig.Delivery.
++const (
++	DeliveryVeth   = "veth"
++	DeliveryNetkit = "netkit"
++
++	// netkitModeL2 keeps Ethernet framing so the existing selection, delivery
++	// and return programs apply unchanged; only the device pair differs.
++	netkitModeL2 = 0
++
++	// tcDeliveryMTU lets the private stack do TCP segmentation and UDP
++	// fragmentation, matching the veth pair's MTU.
++	tcDeliveryMTU = 65535
++)
++
++// createTCDeliveryPair creates the host/peer pair used to cross into the
++// private listener namespace. The returned link is the host end; the caller
++// re-resolves it by name afterwards.
++func createTCDeliveryPair(kind, hostName, peerName string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu int) (netlink.Link, error) {
++	switch kind {
++	case "", DeliveryVeth:
++		veth := &netlink.Veth{
++			LinkAttrs:        netlink.LinkAttrs{Name: hostName, MTU: mtu, HardwareAddr: hostAddress},
++			PeerName:         peerName,
++			PeerHardwareAddr: peerAddress,
++			PeerNamespace:    netlink.NsFd(namespaceFD),
++		}
++		if err := netlink.LinkAdd(veth); err != nil {
++			return nil, E.Cause(err, "create isolated TC veth (CONFIG_VETH and CAP_NET_ADMIN required)")
++		}
++		return veth, nil
++	case DeliveryNetkit:
++		if err := addNetkitPair(hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu); err != nil {
++			return nil, E.Cause(err, "create isolated TC netkit pair (kernel 6.7+, CONFIG_NETKIT and CAP_NET_ADMIN required)")
++		}
++		link, err := netlink.LinkByName(hostName)
++		if err != nil {
++			return nil, E.Cause(err, "find TC eBPF netkit link")
++		}
++		return link, nil
++	default:
++		return nil, E.New("unknown TC eBPF delivery kind: ", kind)
++	}
++}
++
++// addNetkitPair issues RTM_NEWLINK by hand: sagernet/netlink's LinkAdd has a
++// closed set of link types and netkit's nested attributes are not in it.
++func addNetkitPair(hostName, peerName string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu int) error {
++	request := nl.NewNetlinkRequest(unix.RTM_NEWLINK,
++		unix.NLM_F_REQUEST|unix.NLM_F_ACK|unix.NLM_F_CREATE|unix.NLM_F_EXCL)
++	request.AddData(nl.NewIfInfomsg(unix.AF_UNSPEC))
++	request.AddData(nl.NewRtAttr(unix.IFLA_IFNAME, nl.ZeroTerminated(hostName)))
++	request.AddData(nl.NewRtAttr(unix.IFLA_MTU, nl.Uint32Attr(uint32(mtu))))
++	if len(hostAddress) > 0 {
++		request.AddData(nl.NewRtAttr(unix.IFLA_ADDRESS, hostAddress))
++	}
++
++	linkInfo := nl.NewRtAttr(unix.IFLA_LINKINFO, nil)
++	linkInfo.AddRtAttr(nl.IFLA_INFO_KIND, nl.NonZeroTerminated("netkit"))
++	data := linkInfo.AddRtAttr(nl.IFLA_INFO_DATA, nil)
++	data.AddRtAttr(unix.IFLA_NETKIT_MODE, nl.Uint32Attr(netkitModeL2))
++
++	peer := data.AddRtAttr(unix.IFLA_NETKIT_PEER_INFO, nil)
++	nl.NewIfInfomsgChild(peer, unix.AF_UNSPEC)
++	peer.AddRtAttr(unix.IFLA_IFNAME, nl.ZeroTerminated(peerName))
++	peer.AddRtAttr(unix.IFLA_MTU, nl.Uint32Attr(uint32(mtu)))
++	if len(peerAddress) > 0 {
++		peer.AddRtAttr(unix.IFLA_ADDRESS, peerAddress)
++	}
++	peer.AddRtAttr(unix.IFLA_NET_NS_FD, nl.Uint32Attr(uint32(namespaceFD)))
++
++	request.AddData(linkInfo)
++
++	if _, err := request.Execute(unix.NETLINK_ROUTE, 0); err != nil {
++		return err
++	}
++	return nil
++}

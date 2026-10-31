@@ -1,0 +1,89 @@
+diff --git a/option/ebpf.go b/option/ebpf.go
+index fb2474a..586d16d 100644
+--- a/option/ebpf.go
++++ b/option/ebpf.go
+@@ -9,6 +9,10 @@ import (
+ 
+ type EBPFInboundOptions struct {
+ 	Network    NetworkList      `json:"network,omitempty"`
++	// Delivery selects the socket-assignment delivery link:
++	// "" or "veth" (default) uses a veth pair, "netkit" uses a netkit pair in
++	// L2 mode (Linux 6.7+). Only valid when a socket_assign path is enabled.
++	Delivery   string           `json:"delivery,omitempty" enum:"veth,netkit"`
+ 	UDPTimeout UDPTimeoutCompat `json:"udp_timeout,omitempty"`
+ 	// UDPFragment controls whether transparent UDP sockets may fragment
+ 	// oversized datagrams. An omitted value keeps fragmentation disabled.
+diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
+index 8c3848f..6094372 100644
+--- a/protocol/ebpf/inbound.go
++++ b/protocol/ebpf/inbound.go
+@@ -29,6 +29,10 @@ const (
+ 	dnsModeRespectPolicy         = "respect_policy"
+ 	dnsModeOff                   = "off"
+ 	defaultTCPriority            = 1
++
++	deliveryVeth   = "veth"
++	deliveryNetkit = "netkit"
++
+ )
+ 
+ var (
+@@ -65,6 +69,7 @@ type Inbound struct {
+ 	networkManager            adapter.NetworkManager
+ 	localEnabled              bool
+ 	localDataPlane            string
++	delivery                  string
+ 	cgroupPath                string
+ 	cgroupBackend             *commonEBPF.CgroupBackend
+ 	localRoutes               *commonEBPF.LocalRouteSet
+@@ -206,6 +211,15 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+ 		return nil, err
+ 	}
+ 	localDataPlane, cgroupPath, sharedDataPlane := selection.localDataPlane, selection.cgroupPath, selection.sharedDataPlane
++	delivery, err := normalizeDelivery(options.Delivery)
++	if err != nil {
++		return nil, err
++	}
++	if delivery == deliveryNetkit &&
++		localDataPlane != localDataPlaneSocketAssign &&
++		sharedDataPlane != sharedDataPlaneSocketAssign {
++		return nil, E.New("delivery=netkit requires a socket_assign data plane")
++	}
+ 	fakeIPICMPReply, err := normalizeFakeIPICMP(options.FakeIPICMP)
+ 	if err != nil {
+ 		return nil, E.Cause(err, "parse fakeip_icmp")
+@@ -294,6 +308,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+ 		}(),
+ 		localEnabled:        localEnabled,
+ 		localDataPlane:      localDataPlane,
++		delivery:            delivery,
+ 		cgroupPath:          cgroupPath,
+ 		selfBypass:          selfBypass,
+ 		processInfoCache:    newProcessInfoCache(),
+@@ -404,3 +419,14 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
+ 		break
+ 	}
+ }
++
++func normalizeDelivery(value string) (string, error) {
++	switch value {
++	case "", deliveryVeth:
++		return deliveryVeth, nil
++	case deliveryNetkit:
++		return deliveryNetkit, nil
++	default:
++		return "", E.New("unknown eBPF delivery: ", value)
++	}
++}
+diff --git a/protocol/ebpf/inbound_lifecycle.go b/protocol/ebpf/inbound_lifecycle.go
+index d7fadb9..af2c6e0 100644
+--- a/protocol/ebpf/inbound_lifecycle.go
++++ b/protocol/ebpf/inbound_lifecycle.go
+@@ -116,6 +116,7 @@ func (i *Inbound) startInbound() error {
+ 		EnableSharedIPv6: sharedSocketAssignEnabled && i.sharedIPv6,
+ 		EnableTCP:        i.enableTCP,
+ 		EnableUDP:        i.enableUDP,
++		Delivery:         i.delivery,
+ 		Policy:           i.compiledPolicy,
+ 		SelfBypass:       i.selfBypass,
+ 		TrackProcess:     i.processTracker != nil,
