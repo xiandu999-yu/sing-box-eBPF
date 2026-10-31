@@ -45,7 +45,7 @@ index e427125..009d0bd 100644
  	}))
  }
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
-index 8c3848f..74683c7 100644
+index 8c3848f..c5d240e 100644
 --- a/protocol/ebpf/inbound.go
 +++ b/protocol/ebpf/inbound.go
 @@ -29,6 +29,9 @@ const (
@@ -116,7 +116,7 @@ index 8c3848f..74683c7 100644
  		sharedIncludeMAC:    sharedIncludeMAC,
  		sharedExcludeMAC:    sharedExcludeMAC,
  		localPolicy: localUIDPolicy{
-@@ -404,3 +444,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
+@@ -404,3 +444,53 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
  		break
  	}
  }
@@ -159,9 +159,8 @@ index 8c3848f..74683c7 100644
 +	if priority == 0 {
 +		priority = uint16(options.Shared.TCXPriority)
 +	}
-+	if priority == 0 {
-+		priority = defaultTCPriority
-+	}
++	// 0 表示没显式指定优先级，由 tcx_position 决定锚点；不要在这里兜底成 1，
++	// 否则 runtime 会一直走优先级排序，链首/链尾永远不生效。
 +	position := options.Local.TCXPosition
 +	if position == "" {
 +		position = options.Shared.TCXPosition

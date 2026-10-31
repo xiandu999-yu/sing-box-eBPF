@@ -58,6 +58,7 @@
   ```
 
 - `tcx_position` 非法取值报错；两边显式设置且不一致同样报错。
+- `tcx_position: head` 使用显式链首锚点（挂在现有第一个程序之前），**包括没有 priority 标记的程序**；`tail` 挂到链尾；显式 `tcx_priority` 时仍按优先级排序。
 - 只设一边时以设置的为准；都没设时是 `veth` + `head` + priority 1。
 - `inbound_start` 的结构化日志新增 `delivery` 字段，可直接看出实际用的是 veth 还是 netkit。
 
