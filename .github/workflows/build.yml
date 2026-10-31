@@ -362,6 +362,12 @@ jobs:
           GOMIPS: ${{ matrix.gomips }}
           GOMIPS64: ${{ matrix.gomips }}
 
+      - name: Record binary hash
+        run: |
+          set -euo pipefail
+          ls -l dist/sing-box
+          sha256sum dist/sing-box
+
       - name: Set names
         run: |
           set -xeuo pipefail
