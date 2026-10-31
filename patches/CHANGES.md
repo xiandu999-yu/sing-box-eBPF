@@ -59,6 +59,7 @@
 
 - `tcx_position` 非法取值报错；两边显式设置且不一致同样报错。
 - 只设一边时以设置的为准；都没设时是 `veth` + `head` + priority 1。
+- `inbound_start` 的结构化日志新增 `delivery` 字段，可直接看出实际用的是 veth 还是 netkit。
 
 ### 改动文件
 

@@ -33,42 +33,45 @@ index fb2474a..6635d2a 100644
  	DNSMode              string                           `json:"dns_mode,omitempty" enum:"hijack,respect_policy,off"`
  	Interface            badoption.Listable[string]       `json:"interface,omitempty"`
  	IPv6                 *bool                            `json:"ipv6,omitempty"`
+diff --git a/protocol/ebpf/diagnostics.go b/protocol/ebpf/diagnostics.go
+index e427125..009d0bd 100644
+--- a/protocol/ebpf/diagnostics.go
++++ b/protocol/ebpf/diagnostics.go
+@@ -1173,5 +1173,6 @@ func (i *Inbound) logStartupSummary() {
+ 		"waiting_paths":      waiting,
+ 		"waiting_interfaces": waitingInterfaces,
+ 		"fakeip_icmp":        fakeIPICMPSummary,
++		"delivery":           i.delivery,
+ 	}))
+ }
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
-index 8c3848f..a3a25c5 100644
+index 8c3848f..74683c7 100644
 --- a/protocol/ebpf/inbound.go
 +++ b/protocol/ebpf/inbound.go
-@@ -29,6 +29,10 @@ const (
+@@ -29,6 +29,9 @@ const (
  	dnsModeRespectPolicy         = "respect_policy"
  	dnsModeOff                   = "off"
  	defaultTCPriority            = 1
 +
 +	deliveryVeth   = "veth"
 +	deliveryNetkit = "netkit"
-+
  )
  
  var (
-@@ -65,6 +69,7 @@ type Inbound struct {
- 	networkManager            adapter.NetworkManager
- 	localEnabled              bool
- 	localDataPlane            string
-+	delivery                  string
- 	cgroupPath                string
- 	cgroupBackend             *commonEBPF.CgroupBackend
- 	localRoutes               *commonEBPF.LocalRouteSet
-@@ -104,6 +109,8 @@ type Inbound struct {
+@@ -104,6 +107,9 @@ type Inbound struct {
  	localBypassExclude        []netip.Prefix
  	sharedBypassExclude       []netip.Prefix
  	tcPriority                uint16
 +	tcxPriority               uint16
 +	tcxPosition               string
++	delivery                  string
  	networkGeneration         uint64
  	fakeIPIPv4Prefix          netip.Prefix
  	fakeIPIPv6Prefix          netip.Prefix
-@@ -206,6 +213,33 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
- 		return nil, err
+@@ -282,6 +288,37 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+ 			return nil, E.New("eBPF self-bypass sockets were not prepared")
+ 		}
  	}
- 	localDataPlane, cgroupPath, sharedDataPlane := selection.localDataPlane, selection.cgroupPath, selection.sharedDataPlane
 +	localDelivery, err := normalizeDelivery(options.Local.Delivery)
 +	if err != nil {
 +		return nil, err
@@ -96,13 +99,6 @@ index 8c3848f..a3a25c5 100644
 +	} else if options.Shared.Delivery != "" {
 +		delivery = sharedDelivery
 +	}
- 	fakeIPICMPReply, err := normalizeFakeIPICMP(options.FakeIPICMP)
- 	if err != nil {
- 		return nil, E.Cause(err, "parse fakeip_icmp")
-@@ -282,6 +316,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
- 			return nil, E.New("eBPF self-bypass sockets were not prepared")
- 		}
- 	}
 +	tcxPriority, tcxPosition, err := resolveTCXOrder(options)
 +	if err != nil {
 +		return nil, err
@@ -110,35 +106,31 @@ index 8c3848f..a3a25c5 100644
  	inbound := &Inbound{
  		Adapter:        inbound.NewAdapter(C.TypeEBPF, tag),
  		ctx:            ctx,
-@@ -294,6 +332,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
- 		}(),
- 		localEnabled:        localEnabled,
- 		localDataPlane:      localDataPlane,
-+		delivery:            delivery,
- 		cgroupPath:          cgroupPath,
- 		selfBypass:          selfBypass,
- 		processInfoCache:    newProcessInfoCache(),
-@@ -312,6 +351,8 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -312,6 +349,9 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  		localBypassExclude:  localBypassExclude,
  		sharedBypassExclude: sharedBypassExclude,
  		tcPriority:          uint16(options.TCPriority),
 +		tcxPriority:         tcxPriority,
 +		tcxPosition:         tcxPosition,
++		delivery:            delivery,
  		sharedIncludeMAC:    sharedIncludeMAC,
  		sharedExcludeMAC:    sharedExcludeMAC,
  		localPolicy: localUIDPolicy{
-@@ -328,6 +369,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
- 	if inbound.tcPriority == 0 {
- 		inbound.tcPriority = defaultTCPriority
- 	}
-+
- 	inbound.tcAssignmentSweepFailure.Store("")
- 	if dnsTransportManager := service.FromContext[adapter.DNSTransportManager](ctx); dnsTransportManager != nil {
- 		if fakeIPTransport := dnsTransportManager.FakeIP(); fakeIPTransport != nil {
-@@ -404,3 +446,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
+@@ -404,3 +444,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
  		break
  	}
  }
++
++func normalizeDelivery(value string) (string, error) {
++	switch value {
++	case "", deliveryVeth:
++		return deliveryVeth, nil
++	case deliveryNetkit:
++		return deliveryNetkit, nil
++	default:
++		return "", E.New("unknown eBPF delivery: ", value)
++	}
++}
 +
 +// resolveTCXOrder merges the per-scope TCX order. Both scopes share the same
 +// attachments backend, so explicit values must agree.
@@ -178,17 +170,6 @@ index 8c3848f..a3a25c5 100644
 +		position = "head"
 +	}
 +	return priority, position, nil
-+}
-+
-+func normalizeDelivery(value string) (string, error) {
-+	switch value {
-+	case "", deliveryVeth:
-+		return deliveryVeth, nil
-+	case deliveryNetkit:
-+		return deliveryNetkit, nil
-+	default:
-+		return "", E.New("unknown eBPF delivery: ", value)
-+	}
 +}
 diff --git a/protocol/ebpf/inbound_lifecycle.go b/protocol/ebpf/inbound_lifecycle.go
 index d7fadb9..ed62966 100644
