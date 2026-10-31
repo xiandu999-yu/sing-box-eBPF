@@ -1,8 +1,8 @@
 diff --git a/api.go b/api.go
-index cdf7c4b..29de224 100644
+index cdf7c4b..98b2289 100644
 --- a/api.go
 +++ b/api.go
-@@ -250,6 +250,11 @@ type TCConfig struct {
+@@ -250,6 +250,14 @@ type TCConfig struct {
  	EnableTCP          bool
  	EnableUDP          bool
  	DeliveryInterface  uint32
@@ -11,23 +11,27 @@ index cdf7c4b..29de224 100644
 +	Delivery           string
 +	// TCXPriority orders TCX programs on the hook; lower runs first.
 +	TCXPriority        uint16
++	// TCXPosition picks the chain end when TCXPriority is unset:
++	// "head" runs first, "tail" runs last.
++	TCXPosition        string
  	Policy             CompiledPolicy
  	RoutingMark        uint32
  	SelfBypass         *SelfBypass
-@@ -273,6 +278,8 @@ func PrepareTC(config TCConfig) (*TCBackend, error) {
+@@ -273,6 +281,9 @@ func PrepareTC(config TCConfig) (*TCBackend, error) {
  		EnableTCP:          config.EnableTCP,
  		EnableUDP:          config.EnableUDP,
  		DeliveryInterface:  config.DeliveryInterface,
 +		Delivery:           config.Delivery,
 +		TCXPriority:        config.TCXPriority,
++		TCXPosition:        config.TCXPosition,
  		Policy:             config.Policy,
  		RoutingMark:        config.RoutingMark,
  		TrackProcess:       config.TrackProcess,
 diff --git a/internal/core/access.go b/internal/core/access.go
-index 711519b..795969b 100644
+index 711519b..d7684a2 100644
 --- a/internal/core/access.go
 +++ b/internal/core/access.go
-@@ -73,6 +73,22 @@ func NewTCBackendHandle(backend *TCBackend) TCBackendHandle {
+@@ -73,6 +73,30 @@ func NewTCBackendHandle(backend *TCBackend) TCBackendHandle {
  	return TCBackendHandle{backend: backend}
  }
  
@@ -37,6 +41,14 @@ index 711519b..795969b 100644
 +		return ""
 +	}
 +	return h.backend.delivery
++}
++
++// TCXPosition reports the configured TCX chain end ("head" or "tail").
++func (h TCBackendHandle) TCXPosition() string {
++	if h.backend == nil {
++		return ""
++	}
++	return h.backend.tcxPosition
 +}
 +
 +// TCXPriority reports the configured TCX ordering priority.
@@ -51,39 +63,44 @@ index 711519b..795969b 100644
  	return h.backend
  }
 diff --git a/internal/core/tc.go b/internal/core/tc.go
-index 3ec9cae..0bc4ab3 100644
+index 3ec9cae..57b6856 100644
 --- a/internal/core/tc.go
 +++ b/internal/core/tc.go
-@@ -101,6 +101,9 @@ type TCConfig struct {
+@@ -101,6 +101,12 @@ type TCConfig struct {
  	EnableTCP          bool
  	EnableUDP          bool
  	DeliveryInterface  uint32
 +	Delivery           string
 +	// TCXPriority orders TCX programs on the hook; lower runs first.
 +	TCXPriority        uint16
++	// TCXPosition picks the chain end when TCXPriority is unset:
++	// "head" runs first, "tail" runs last.
++	TCXPosition        string
  	Policy             CompiledPolicy
  	RoutingMark        uint32
  	SelfBypassMap      *CiliumEBPF.Map
-@@ -204,6 +207,8 @@ type TCBackend struct {
+@@ -204,6 +210,9 @@ type TCBackend struct {
  	runtime                   *tcRuntime
  	tcpListenerMap            bool
  	programsExposed           bool
 +	delivery                  string
 +	tcxPriority               uint16
++	tcxPosition               string
  	control                   tcControl
  	controlMapFD              int
  	assignmentMapFD           int
-@@ -350,6 +355,8 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
+@@ -350,6 +359,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
  		controlMapFD:       maps["tc_control"].FD(),
  		assignmentMapFD:    maps["tc_assignment"].FD(),
  		assignmentCapacity: config.AssignmentCapacity,
 +		delivery:           config.Delivery,
 +		tcxPriority:        config.TCXPriority,
++		tcxPosition:        config.TCXPosition,
  		selfMapExternal:    config.EnableLocal && config.SelfBypassMap != nil,
  	}
  	// From here, backend owns maps and loadedPrograms: giving up on either of the
 diff --git a/runtime/tc_dataplane.go b/runtime/tc_dataplane.go
-index 31d06ac..fe4c24d 100644
+index 31d06ac..e6c3e7d 100644
 --- a/runtime/tc_dataplane.go
 +++ b/runtime/tc_dataplane.go
 @@ -28,7 +28,6 @@ const (
@@ -112,7 +129,7 @@ index 31d06ac..fe4c24d 100644
  	dataPlane.namespace = namespace
  	dataPlane.enableIPv6 = enableIPv6
  	cleanup := func(startErr error) (*tcDataPlane, error) {
-@@ -525,6 +528,17 @@ func (a *tcInterfaceAttachment) attachSlotFilter(
+@@ -525,6 +528,23 @@ func (a *tcInterfaceAttachment) attachSlotFilter(
  	return attachFilter(link, identity.parent, programFD, identity.name, identity.handle, priority)
  }
  
@@ -123,6 +140,12 @@ index 31d06ac..fe4c24d 100644
 +		if value := backend.TCXPriority(); value != 0 {
 +			return value
 +		}
++		switch backend.TCXPosition() {
++		case "tail":
++			return ^uint16(0)
++		case "head":
++			return DefaultTCPriority
++		}
 +	}
 +	return fallback
 +}
@@ -130,7 +153,7 @@ index 31d06ac..fe4c24d 100644
  func tcxUnsupportedError(err error) bool {
  	return err != nil && (errors.Is(err, CiliumEBPF.ErrNotSupported) ||
  		errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS) ||
-@@ -557,7 +571,8 @@ func attachTCXInterface(linkDevice netlink.Link, backend *commonEBPF.TCBackend,
+@@ -557,7 +577,8 @@ func attachTCXInterface(linkDevice netlink.Link, backend *commonEBPF.TCBackend,
  			continue
  		}
  		mainLink, icmpLink, err := attachTCXProgramPair(
@@ -140,7 +163,7 @@ index 31d06ac..fe4c24d 100644
  		)
  		if err != nil {
  			return closeLinks(err)
-@@ -782,7 +797,7 @@ func updateTCXInterfaceAttachment(
+@@ -782,7 +803,7 @@ func updateTCXInterfaceAttachment(
  		added := false
  		if attached == nil {
  			var err error
@@ -149,7 +172,7 @@ index 31d06ac..fe4c24d 100644
  			if err != nil {
  				return err
  			}
-@@ -815,7 +830,7 @@ func updateTCXInterfaceAttachment(
+@@ -815,7 +836,7 @@ func updateTCXInterfaceAttachment(
  				}
  				return startErr
  			}

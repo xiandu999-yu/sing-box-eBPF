@@ -1,18 +1,8 @@
 diff --git a/option/ebpf.go b/option/ebpf.go
-index fb2474a..428c1b2 100644
+index fb2474a..6635d2a 100644
 --- a/option/ebpf.go
 +++ b/option/ebpf.go
-@@ -14,6 +14,9 @@ type EBPFInboundOptions struct {
- 	// oversized datagrams. An omitted value keeps fragmentation disabled.
- 	UDPFragment *bool             `json:"udp_fragment,omitempty"`
- 	TCPriority  EBPFTCPriority    `json:"tc_priority,omitempty"`
-+	// TCXPriority orders the TCX programs on the hook; lower runs first.
-+	// Defaults to 1 (top). tc_priority only applies to clsact filters.
-+	TCXPriority EBPFTCPriority    `json:"tcx_priority,omitempty"`
- 	Local       EBPFLocalOptions  `json:"local,omitempty"`
- 	Shared      EBPFSharedOptions `json:"shared,omitempty"`
- 	// FakeIPICMP, when "reply", answers ICMP Echo Request packets addressed to
-@@ -30,6 +33,11 @@ type EBPFLocalOptions struct {
+@@ -30,6 +30,15 @@ type EBPFLocalOptions struct {
  	Enabled              *bool                            `json:"enabled,omitempty"`
  	DNSMode              string                           `json:"dns_mode,omitempty" enum:"hijack,respect_policy,off"`
  	DataPlane            string                           `json:"data_plane,omitempty" enum:"cgroup,socket_assign"`
@@ -21,10 +11,14 @@ index fb2474a..428c1b2 100644
 +	// (Linux 6.7+). Only valid when local.data_plane is socket_assign.
 +	// local and shared share one delivery link, so both must agree.
 +	Delivery             string                           `json:"delivery,omitempty" enum:"veth,netkit"`
++	// TCXPosition picks the TCX chain end: "head" (default) runs first,
++	// "tail" runs last. TCXPriority overrides it when non-zero.
++	TCXPriority          EBPFTCPriority                   `json:"tcx_priority,omitempty"`
++	TCXPosition          string                           `json:"tcx_position,omitempty" enum:"head,tail"`
  	CgroupPath           string                           `json:"cgroup_path,omitempty"`
  	IPv6                 *bool                            `json:"ipv6,omitempty"`
  	BypassPrivateAddress *bool                            `json:"bypass_private_address,omitempty"`
-@@ -50,6 +58,10 @@ type EBPFSharedOptions struct {
+@@ -50,6 +59,14 @@ type EBPFSharedOptions struct {
  	Enabled              *bool                            `json:"enabled,omitempty"`
  	DefaultInterface     bool                             `json:"default_interface,omitempty"`
  	DataPlane            string                           `json:"data_plane,omitempty" enum:"socket_assign,packet_rewrite"`
@@ -32,11 +26,15 @@ index fb2474a..428c1b2 100644
 +	// (default) uses a veth pair, "netkit" uses a netkit pair in L2 mode
 +	// (Linux 6.7+). Only valid when shared.data_plane is socket_assign.
 +	Delivery             string                           `json:"delivery,omitempty" enum:"veth,netkit"`
++	// TCXPosition picks the TCX chain end: "head" (default) runs first,
++	// "tail" runs last. TCXPriority overrides it when non-zero.
++	TCXPriority          EBPFTCPriority                   `json:"tcx_priority,omitempty"`
++	TCXPosition          string                           `json:"tcx_position,omitempty" enum:"head,tail"`
  	DNSMode              string                           `json:"dns_mode,omitempty" enum:"hijack,respect_policy,off"`
  	Interface            badoption.Listable[string]       `json:"interface,omitempty"`
  	IPv6                 *bool                            `json:"ipv6,omitempty"`
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
-index 8c3848f..c193922 100644
+index 8c3848f..a3a25c5 100644
 --- a/protocol/ebpf/inbound.go
 +++ b/protocol/ebpf/inbound.go
 @@ -29,6 +29,10 @@ const (
@@ -58,15 +56,16 @@ index 8c3848f..c193922 100644
  	cgroupPath                string
  	cgroupBackend             *commonEBPF.CgroupBackend
  	localRoutes               *commonEBPF.LocalRouteSet
-@@ -104,6 +109,7 @@ type Inbound struct {
+@@ -104,6 +109,8 @@ type Inbound struct {
  	localBypassExclude        []netip.Prefix
  	sharedBypassExclude       []netip.Prefix
  	tcPriority                uint16
 +	tcxPriority               uint16
++	tcxPosition               string
  	networkGeneration         uint64
  	fakeIPIPv4Prefix          netip.Prefix
  	fakeIPIPv6Prefix          netip.Prefix
-@@ -206,6 +212,33 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -206,6 +213,33 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  		return nil, err
  	}
  	localDataPlane, cgroupPath, sharedDataPlane := selection.localDataPlane, selection.cgroupPath, selection.sharedDataPlane
@@ -100,7 +99,18 @@ index 8c3848f..c193922 100644
  	fakeIPICMPReply, err := normalizeFakeIPICMP(options.FakeIPICMP)
  	if err != nil {
  		return nil, E.Cause(err, "parse fakeip_icmp")
-@@ -294,6 +327,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -282,6 +316,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+ 			return nil, E.New("eBPF self-bypass sockets were not prepared")
+ 		}
+ 	}
++	tcxPriority, tcxPosition, err := resolveTCXOrder(options)
++	if err != nil {
++		return nil, err
++	}
+ 	inbound := &Inbound{
+ 		Adapter:        inbound.NewAdapter(C.TypeEBPF, tag),
+ 		ctx:            ctx,
+@@ -294,6 +332,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  		}(),
  		localEnabled:        localEnabled,
  		localDataPlane:      localDataPlane,
@@ -108,28 +118,67 @@ index 8c3848f..c193922 100644
  		cgroupPath:          cgroupPath,
  		selfBypass:          selfBypass,
  		processInfoCache:    newProcessInfoCache(),
-@@ -312,6 +346,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -312,6 +351,8 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  		localBypassExclude:  localBypassExclude,
  		sharedBypassExclude: sharedBypassExclude,
  		tcPriority:          uint16(options.TCPriority),
-+		tcxPriority:         uint16(options.TCXPriority),
++		tcxPriority:         tcxPriority,
++		tcxPosition:         tcxPosition,
  		sharedIncludeMAC:    sharedIncludeMAC,
  		sharedExcludeMAC:    sharedExcludeMAC,
  		localPolicy: localUIDPolicy{
-@@ -328,6 +363,9 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -328,6 +369,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  	if inbound.tcPriority == 0 {
  		inbound.tcPriority = defaultTCPriority
  	}
-+	if inbound.tcxPriority == 0 {
-+		inbound.tcxPriority = defaultTCPriority
-+	}
++
  	inbound.tcAssignmentSweepFailure.Store("")
  	if dnsTransportManager := service.FromContext[adapter.DNSTransportManager](ctx); dnsTransportManager != nil {
  		if fakeIPTransport := dnsTransportManager.FakeIP(); fakeIPTransport != nil {
-@@ -404,3 +442,14 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
+@@ -404,3 +446,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
  		break
  	}
  }
++
++// resolveTCXOrder merges the per-scope TCX order. Both scopes share the same
++// attachments backend, so explicit values must agree.
++func resolveTCXOrder(options option.EBPFInboundOptions) (uint16, string, error) {
++	for scope, position := range map[string]string{
++		"local":  options.Local.TCXPosition,
++		"shared": options.Shared.TCXPosition,
++	} {
++		switch position {
++		case "", "head", "tail":
++		default:
++			return 0, "", E.New(scope, ".tcx_position must be head or tail: ", position)
++		}
++	}
++	if options.Local.TCXPriority != 0 && options.Shared.TCXPriority != 0 &&
++		options.Local.TCXPriority != options.Shared.TCXPriority {
++		return 0, "", E.New("local.tcx_priority (", options.Local.TCXPriority,
++			") and shared.tcx_priority (", options.Shared.TCXPriority, ") differ")
++	}
++	if options.Local.TCXPosition != "" && options.Shared.TCXPosition != "" &&
++		options.Local.TCXPosition != options.Shared.TCXPosition {
++		return 0, "", E.New("local.tcx_position (", options.Local.TCXPosition,
++			") and shared.tcx_position (", options.Shared.TCXPosition, ") differ")
++	}
++	priority := uint16(options.Local.TCXPriority)
++	if priority == 0 {
++		priority = uint16(options.Shared.TCXPriority)
++	}
++	if priority == 0 {
++		priority = defaultTCPriority
++	}
++	position := options.Local.TCXPosition
++	if position == "" {
++		position = options.Shared.TCXPosition
++	}
++	if position == "" {
++		position = "head"
++	}
++	return priority, position, nil
++}
 +
 +func normalizeDelivery(value string) (string, error) {
 +	switch value {
@@ -142,15 +191,16 @@ index 8c3848f..c193922 100644
 +	}
 +}
 diff --git a/protocol/ebpf/inbound_lifecycle.go b/protocol/ebpf/inbound_lifecycle.go
-index d7fadb9..8eeff4b 100644
+index d7fadb9..ed62966 100644
 --- a/protocol/ebpf/inbound_lifecycle.go
 +++ b/protocol/ebpf/inbound_lifecycle.go
-@@ -116,6 +116,8 @@ func (i *Inbound) startInbound() error {
+@@ -116,6 +116,9 @@ func (i *Inbound) startInbound() error {
  		EnableSharedIPv6: sharedSocketAssignEnabled && i.sharedIPv6,
  		EnableTCP:        i.enableTCP,
  		EnableUDP:        i.enableUDP,
 +		Delivery:         i.delivery,
 +		TCXPriority:      i.tcxPriority,
++		TCXPosition:      i.tcxPosition,
  		Policy:           i.compiledPolicy,
  		SelfBypass:       i.selfBypass,
  		TrackProcess:     i.processTracker != nil,
