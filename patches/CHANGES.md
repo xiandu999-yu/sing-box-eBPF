@@ -19,7 +19,7 @@
 
 | 字段 | 取值 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `delivery` | `veth` / `netkit` | `veth` | socket_assign 的交付链路类型 |
+| `delivery` | `veth` / `netkit` / `auto` | `veth` | socket_assign 的交付链路类型；`auto` 优先 netkit，建不出来退回 veth |
 | `tcx_position` | `head` / `tail` | `head` | TCX 挂链首还是链尾 |
 | `tcx_priority` | 1–65535 | 未设 | 显式数字，设置后覆盖 `tcx_position` |
 

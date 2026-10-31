@@ -187,7 +187,7 @@ index b469b01..4bbc333 100644
 +// coreAttachTCXPositioned is the positioned variant used by head/tail.
 +var coreAttachTCXPositioned = core.AttachTCXPositioned
 diff --git a/runtime/tc_dataplane.go b/runtime/tc_dataplane.go
-index 31d06ac..61ccdc0 100644
+index 31d06ac..31bc510 100644
 --- a/runtime/tc_dataplane.go
 +++ b/runtime/tc_dataplane.go
 @@ -28,7 +28,6 @@ const (
@@ -198,7 +198,11 @@ index 31d06ac..61ccdc0 100644
  var tcxSupport atomic.Int32
  
  const (
-@@ -113,6 +112,10 @@ type tcDeliveryLink struct {
+@@ -110,9 +109,14 @@ type tcDeliveryLink struct {
+ 	replyMTU     int
+ 	redirectName string
+ 	deliveryName string
++	deliveryKind string
  	redirect     netlink.Link
  	delivery     netlink.Link
  	filter       *netlink.BpfFilter
@@ -209,7 +213,7 @@ index 31d06ac..61ccdc0 100644
  	// deliveryMAC is the private end's address programmed into the backend
  	// as every redirected frame's destination.
  	deliveryMAC commonEBPF.MACAddress
-@@ -124,6 +127,7 @@ type tcDataPlane struct {
+@@ -124,6 +128,7 @@ type tcDataPlane struct {
  	replyMTU              int
  	access                sync.Mutex
  	backend               *commonEBPF.TCBackend
@@ -217,7 +221,7 @@ index 31d06ac..61ccdc0 100644
  	routing               *tcPolicyRouting
  	delivery              *tcDeliveryLink
  	attachments           []*tcInterfaceAttachment
-@@ -211,6 +215,9 @@ func startTCDataPlane(
+@@ -211,6 +216,9 @@ func startTCDataPlane(
  	namespace *TCNamespace,
  ) (*tcDataPlane, error) {
  	dataPlane := &tcDataPlane{backend: backend, sharedSourceMACPolicy: sharedSourceMACPolicy, priority: priority}
@@ -227,7 +231,7 @@ index 31d06ac..61ccdc0 100644
  	dataPlane.namespace = namespace
  	dataPlane.enableIPv6 = enableIPv6
  	cleanup := func(startErr error) (*tcDataPlane, error) {
-@@ -525,6 +532,36 @@ func (a *tcInterfaceAttachment) attachSlotFilter(
+@@ -525,6 +533,36 @@ func (a *tcInterfaceAttachment) attachSlotFilter(
  	return attachFilter(link, identity.parent, programFD, identity.name, identity.handle, priority)
  }
  
@@ -264,7 +268,7 @@ index 31d06ac..61ccdc0 100644
  func tcxUnsupportedError(err error) bool {
  	return err != nil && (errors.Is(err, CiliumEBPF.ErrNotSupported) ||
  		errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS) ||
-@@ -557,7 +594,8 @@ func attachTCXInterface(linkDevice netlink.Link, backend *commonEBPF.TCBackend,
+@@ -557,7 +595,8 @@ func attachTCXInterface(linkDevice netlink.Link, backend *commonEBPF.TCBackend,
  			continue
  		}
  		mainLink, icmpLink, err := attachTCXProgramPair(
@@ -274,7 +278,7 @@ index 31d06ac..61ccdc0 100644
  		)
  		if err != nil {
  			return closeLinks(err)
-@@ -575,12 +613,13 @@ func attachTCXProgramPair(
+@@ -575,12 +614,13 @@ func attachTCXProgramPair(
  	icmpProgram *CiliumEBPF.Program,
  	icmpEnabled bool,
  	role string,
@@ -289,7 +293,7 @@ index 31d06ac..61ccdc0 100644
  	if err != nil {
  		return nil, nil, err
  	}
-@@ -590,7 +629,7 @@ func attachTCXProgramPair(
+@@ -590,7 +630,7 @@ func attachTCXProgramPair(
  	if icmpProgram == nil {
  		return nil, nil, E.Errors(E.New("icmp_echo_reply ", role, " reply program is unavailable"), mainLink.Close())
  	}
@@ -298,7 +302,7 @@ index 31d06ac..61ccdc0 100644
  	if err != nil {
  		return nil, nil, E.Errors(err, mainLink.Close())
  	}
-@@ -782,7 +821,7 @@ func updateTCXInterfaceAttachment(
+@@ -782,7 +822,7 @@ func updateTCXInterfaceAttachment(
  		added := false
  		if attached == nil {
  			var err error
@@ -307,7 +311,7 @@ index 31d06ac..61ccdc0 100644
  			if err != nil {
  				return err
  			}
-@@ -815,7 +854,7 @@ func updateTCXInterfaceAttachment(
+@@ -815,7 +855,7 @@ func updateTCXInterfaceAttachment(
  				}
  				return startErr
  			}
@@ -479,7 +483,7 @@ index 03778a4..42d23cb 100644
  		}
  	}
 diff --git a/runtime/tc_isolated_delivery.go b/runtime/tc_isolated_delivery.go
-index 335242f..183c4c6 100644
+index 335242f..0278887 100644
 --- a/runtime/tc_isolated_delivery.go
 +++ b/runtime/tc_isolated_delivery.go
 @@ -51,7 +51,7 @@ func (d *tcDataPlane) inNamespace(block func() error) error {
@@ -491,7 +495,7 @@ index 335242f..183c4c6 100644
  	if err != nil {
  		return nil, err
  	}
-@@ -69,18 +69,12 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+@@ -69,18 +69,13 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
  		n.access.RUnlock()
  		return nil, os.ErrClosed
  	}
@@ -502,18 +506,19 @@ index 335242f..183c4c6 100644
 -		PeerNamespace:    netlink.NsFd(n.handle),
 -	}
 -	err = netlink.LinkAdd(veth)
-+	created, err := createTCDeliveryPair(d.deliveryKind, hostName, peerName, hostAddress, peerAddress, int(n.handle), tcDeliveryMTU)
++	created, actualKind, err := createTCDeliveryPair(d.deliveryKind, hostName, peerName, hostAddress, peerAddress, int(n.handle), tcDeliveryMTU)
  	n.access.RUnlock()
  	if err != nil {
 -		return nil, E.Cause(err, "create isolated TC veth (CONFIG_VETH and CAP_NET_ADMIN required)")
 +		return nil, err
  	}
 -	owner := &tcDeliveryLink{namespace: n, redirectName: hostName, deliveryName: peerName, redirect: veth, enableIPv6: d.enableIPv6, replyMTU: d.replyMTU}
-+	owner := &tcDeliveryLink{namespace: n, redirectName: hostName, deliveryName: peerName, redirect: created, enableIPv6: d.enableIPv6, replyMTU: d.replyMTU}
++	owner := &tcDeliveryLink{namespace: n, redirectName: hostName, deliveryName: peerName, redirect: created,
++		deliveryKind: actualKind, enableIPv6: d.enableIPv6, replyMTU: d.replyMTU}
  	cleanup := func(cause error) (*tcDeliveryLink, error) {
  		err := E.Errors(cause, owner.Close())
  		if owner.IsClosed() {
-@@ -90,17 +84,15 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+@@ -90,17 +85,15 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
  	}
  	owner.redirect, err = d.linkByName()(hostName)
  	if err != nil {
@@ -535,7 +540,7 @@ index 335242f..183c4c6 100644
  	if err != nil {
  		return cleanup(err)
  	}
-@@ -113,11 +105,9 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+@@ -113,11 +106,9 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
  		if _, err = owner.configureIsolatedPeer(true); err != nil {
  			return err
  		}
@@ -550,7 +555,7 @@ index 335242f..183c4c6 100644
  		return err
  	})
  	if err != nil {
-@@ -294,7 +284,7 @@ func (d *tcDeliveryLink) healthyIsolated(priority uint16) (bool, error) {
+@@ -294,7 +285,7 @@ func (d *tcDeliveryLink) healthyIsolated(priority uint16) (bool, error) {
  	if mac, valid := tcDeliveryMACAddress(d.delivery); !valid || mac != d.deliveryMAC {
  		return false, nil
  	}
@@ -559,7 +564,7 @@ index 335242f..183c4c6 100644
  	if err != nil || !live {
  		return false, err
  	}
-@@ -304,7 +294,7 @@ func (d *tcDeliveryLink) healthyIsolated(priority uint16) (bool, error) {
+@@ -304,7 +295,7 @@ func (d *tcDeliveryLink) healthyIsolated(priority uint16) (bool, error) {
  		if err != nil || !live {
  			return err
  		}
@@ -568,7 +573,7 @@ index 335242f..183c4c6 100644
  		return err
  	})
  	return live, err
-@@ -335,22 +325,12 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+@@ -335,22 +326,12 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
  		}
  		changed = true
  	}
@@ -597,7 +602,7 @@ index 335242f..183c4c6 100644
  	}
  	err = d.namespace.with(func() error {
  		healthy, err := d.configureIsolatedPeer(true)
-@@ -358,17 +338,23 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+@@ -358,17 +339,23 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
  		if err != nil {
  			return err
  		}
@@ -627,10 +632,10 @@ index 335242f..183c4c6 100644
  	}
 diff --git a/runtime/tc_netkit.go b/runtime/tc_netkit.go
 new file mode 100644
-index 0000000..945e9ac
+index 0000000..993cdf5
 --- /dev/null
 +++ b/runtime/tc_netkit.go
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,110 @@
 +//go:build with_ebpf && (linux || android)
 +
 +package runtime
@@ -648,6 +653,9 @@ index 0000000..945e9ac
 +const (
 +	DeliveryVeth   = "veth"
 +	DeliveryNetkit = "netkit"
++	// DeliveryAuto prefers netkit and falls back to veth when netkit cannot be
++	// created on this kernel.
++	DeliveryAuto = "auto"
 +
 +	// netkitModeL2 keeps Ethernet framing so the existing selection, delivery
 +	// and return programs apply unchanged; only the device pair differs.
@@ -661,31 +669,48 @@ index 0000000..945e9ac
 +// createTCDeliveryPair creates the host/peer pair used to cross into the
 +// private listener namespace. The returned link is the host end; the caller
 +// re-resolves it by name afterwards.
-+func createTCDeliveryPair(kind, hostName, peerName string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu int) (netlink.Link, error) {
++func createTCDeliveryPair(kind, hostName, peerName string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu int) (netlink.Link, string, error) {
 +	switch kind {
 +	case "", DeliveryVeth:
-+		veth := &netlink.Veth{
-+			LinkAttrs:        netlink.LinkAttrs{Name: hostName, MTU: mtu, HardwareAddr: hostAddress},
-+			PeerName:         peerName,
-+			PeerHardwareAddr: peerAddress,
-+			PeerNamespace:    netlink.NsFd(namespaceFD),
-+		}
-+		if err := netlink.LinkAdd(veth); err != nil {
-+			return nil, E.Cause(err, "create isolated TC veth (CONFIG_VETH and CAP_NET_ADMIN required)")
-+		}
-+		return veth, nil
++		link, err := addVethPair(hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu)
++		return link, DeliveryVeth, err
 +	case DeliveryNetkit:
-+		if err := addNetkitPair(hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu); err != nil {
-+			return nil, E.Cause(err, "create isolated TC netkit pair (kernel 6.7+, CONFIG_NETKIT and CAP_NET_ADMIN required)")
++		link, err := addNetkitDelivery(hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu)
++		return link, DeliveryNetkit, err
++	case DeliveryAuto:
++		// Prefer netkit; fall back to veth when the kernel rejects it.
++		if link, err := addNetkitDelivery(hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu); err == nil {
++			return link, DeliveryNetkit, nil
 +		}
-+		link, err := netlink.LinkByName(hostName)
-+		if err != nil {
-+			return nil, E.Cause(err, "find TC eBPF netkit link")
-+		}
-+		return link, nil
++		link, err := addVethPair(hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu)
++		return link, DeliveryVeth, err
 +	default:
-+		return nil, E.New("unknown TC eBPF delivery kind: ", kind)
++		return nil, "", E.New("unknown TC eBPF delivery kind: ", kind)
 +	}
++}
++
++func addVethPair(hostName, peerName string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu int) (netlink.Link, error) {
++	veth := &netlink.Veth{
++		LinkAttrs:        netlink.LinkAttrs{Name: hostName, MTU: mtu, HardwareAddr: hostAddress},
++		PeerName:         peerName,
++		PeerHardwareAddr: peerAddress,
++		PeerNamespace:    netlink.NsFd(namespaceFD),
++	}
++	if err := netlink.LinkAdd(veth); err != nil {
++		return nil, E.Cause(err, "create isolated TC veth (CONFIG_VETH and CAP_NET_ADMIN required)")
++	}
++	return veth, nil
++}
++
++func addNetkitDelivery(hostName, peerName string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu int) (netlink.Link, error) {
++	if err := addNetkitPair(hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu); err != nil {
++		return nil, E.Cause(err, "create isolated TC netkit pair (kernel 6.7+, CONFIG_NETKIT and CAP_NET_ADMIN required)")
++	}
++	link, err := netlink.LinkByName(hostName)
++	if err != nil {
++		return nil, E.Cause(err, "find TC eBPF netkit link")
++	}
++	return link, nil
 +}
 +
 +// addNetkitPair issues RTM_NEWLINK by hand: sagernet/netlink's LinkAdd has a
