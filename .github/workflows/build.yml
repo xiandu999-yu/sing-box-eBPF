@@ -12,6 +12,7 @@ name: Build
 #                                      go mod edit -replace 接进构建；
 #                                      没有 pin.env 才回退到 go.mod 的伪版本
 # 具体逻辑见 .github/scripts/apply-patches.sh。
+# 补丁内容与配置说明见 patches/CHANGES.md。
 #
 # 改编自 sing-box 官方 .github/workflows/build.yml，去掉了 Android/iOS/macOS
 # 客户端、桌面客户端、deb/rpm/pacman 打包以及 cronet(naive) 工具链。

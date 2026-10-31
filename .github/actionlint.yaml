@@ -1,0 +1,5 @@
+# ubuntu-26.04 已经是 GitHub 的正式 runner 标签（2026-10 GA），
+# 但 actionlint 内置的标签表还没收录，这里显式声明以免误报。
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

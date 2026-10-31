@@ -81,7 +81,7 @@ if [ -d "$ROOT/patches/modules" ]; then
 		name="$(basename "$dir")"
 		files=("$dir"*.patch)
 		if [ ${#files[@]} -eq 0 ]; then
-			echo "::notice::patches/modules/$name has no *.patch, skipped"
+			echo "modules/$name: no patches, skipped"
 			continue
 		fi
 
@@ -138,6 +138,6 @@ if [ -d "$ROOT/patches/modules" ]; then
 		apply_patches "$module_dir" "$name" "${files[@]}"
 
 		( cd "$SRC_ABS" && go mod edit -replace "$module_path=$module_dir" )
-		echo "::notice::replaced $module_path => $module_dir ($full_sha)"
+		echo "replaced $module_path => $module_dir ($full_sha)"
 	done
 fi
