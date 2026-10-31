@@ -726,7 +726,7 @@ index a898f01..23f9da1 100644
  
  struct sb_tc_uid_key {
 diff --git a/native/tc_isolation.h b/native/tc_isolation.h
-index 5cccc00..beedebb 100644
+index 5cccc00..3966a84 100644
 --- a/native/tc_isolation.h
 +++ b/native/tc_isolation.h
 @@ -64,7 +64,9 @@ INLINE __u32 assignment_record(const struct sb_tc_assign_key *flow, __u8 tcp_fla
@@ -735,7 +735,7 @@ index 5cccc00..beedebb 100644
  INLINE int deliver_isolated(struct __sk_buff *skb, const struct sb_tc_control *control, bool ethernet) {
 -    if (ethernet) {
 +    if (control->delivery_mode != 0U) {
-+        if (skb_adjust_room(skb, -(int)sizeof(struct ethernet_header), BPF_ADJ_ROOM_MAC, 0U) != 0) return TC_ACT_SHOT;
++        if (bpf_skb_adjust_room(skb, -(int)sizeof(struct ethernet_header), BPF_ADJ_ROOM_MAC, 0U) != 0) return TC_ACT_SHOT;
 +    } else if (ethernet) {
          if (skb_store_bytes(skb, 0U, control->delivery_mac, 6U, 0U) != 0) return TC_ACT_SHOT;
      } else {
