@@ -49,14 +49,14 @@ concurrency:
 jobs:
   version:
     name: Resolve version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       repository: ${{ steps.pin.outputs.repository }}
       commit: ${{ steps.pin.outputs.commit }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Read sing-box.commit
         id: pin
@@ -83,7 +83,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout sing-box
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ steps.pin.outputs.repository }}
           ref: ${{ steps.pin.outputs.commit }}
@@ -115,11 +115,39 @@ jobs:
             version="${core}"
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "::notice::building ${version}"
+          echo "building ${version}"
+
+      - name: Write build info
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "sing-box (reF1nd eBPF fork)"
+            echo "repository:  ${{ steps.pin.outputs.repository }}"
+            echo "commit:      ${{ steps.pin.outputs.commit }}"
+            echo "version:     ${{ steps.resolve.outputs.version }}"
+            echo "built at:    $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo
+            echo "patches:"
+            mapfile -t patch_files < <(find patches -type f \( -name '*.patch' -o -name '*.diff' \) 2>/dev/null | sort)
+            if [ ${#patch_files[@]} -eq 0 ]; then
+              echo "  (none)"
+            else
+              printf '  - %s\n' "${patch_files[@]}"
+            fi
+          } > build-info.txt
+          cat build-info.txt
+
+      - name: Upload build info
+        uses: actions/upload-artifact@v6
+        with:
+          name: build-info
+          path: build-info.txt
+          retention-days: 7
 
   build-linux:
     name: Linux ${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) }}${{ matrix.go386 && format('_{0}', matrix.go386) }}${{ matrix.gomips && format('_{0}', matrix.gomips) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     needs:
       - version
@@ -149,10 +177,10 @@ jobs:
           - { goarch: arm, goarm: "5", openwrt: "arm_arm926ej-s arm_cortex-a7 arm_cortex-a9 arm_fa526 arm_xscale" }
           - { goarch: arm, goarm: "6", openwrt: "arm_arm1176jzf-s_vfp" }
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Checkout sing-box
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ needs.version.outputs.repository }}
           ref: ${{ needs.version.outputs.commit }}
@@ -160,7 +188,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: src/go.mod
           cache: true
@@ -259,7 +287,7 @@ jobs:
           rm -r "${DIR_NAME}" sing-box
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: binary-linux-${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) }}${{ matrix.go386 && format('_{0}', matrix.go386) }}${{ matrix.gomips && format('_{0}', matrix.gomips) }}
           path: src/dist
@@ -270,17 +298,23 @@ jobs:
   release:
     name: Publish release
     if: ${{ github.event_name == 'push' || inputs.release }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - version
       - build-linux
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           pattern: binary-*
           path: dist
           merge-multiple: true
+
+      - name: Download build info
+        uses: actions/download-artifact@v6
+        with:
+          name: build-info
+          path: dist
 
       - name: List artifacts
         run: ls -lh dist
