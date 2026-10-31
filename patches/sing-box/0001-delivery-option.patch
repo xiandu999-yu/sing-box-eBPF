@@ -53,7 +53,7 @@ index eadef9e..f0fd6be 100644
  		Mode:                mode,
  		LocalDataPlane:      commonEBPF.KernelProbeDataPlane(commandEBPFStatusLocal),
 diff --git a/option/ebpf.go b/option/ebpf.go
-index fb2474a..affe55c 100644
+index fb2474a..e3e3de2 100644
 --- a/option/ebpf.go
 +++ b/option/ebpf.go
 @@ -30,6 +30,15 @@ type EBPFLocalOptions struct {
@@ -64,7 +64,7 @@ index fb2474a..affe55c 100644
 +	// (default) uses a veth pair, "netkit" uses a netkit pair in L2 mode
 +	// (Linux 6.7+). Only valid when local.data_plane is socket_assign.
 +	// local and shared share one delivery link, so both must agree.
-+	Delivery             string                           `json:"delivery,omitempty" enum:"veth,netkit,auto"`
++	Delivery             string                           `json:"delivery,omitempty" enum:"veth,netkit,netkit-l3,auto"`
 +	// TCXPosition picks the TCX chain end: "head" (default) runs first,
 +	// "tail" runs last. TCXPriority overrides it when non-zero.
 +	TCXPriority          EBPFTCPriority                   `json:"tcx_priority,omitempty"`
@@ -79,7 +79,7 @@ index fb2474a..affe55c 100644
 +	// Delivery selects the socket-assignment delivery link: "" or "veth"
 +	// (default) uses a veth pair, "netkit" uses a netkit pair in L2 mode
 +	// (Linux 6.7+). Only valid when shared.data_plane is socket_assign.
-+	Delivery             string                           `json:"delivery,omitempty" enum:"veth,netkit,auto"`
++	Delivery             string                           `json:"delivery,omitempty" enum:"veth,netkit,netkit-l3,auto"`
 +	// TCXPosition picks the TCX chain end: "head" (default) runs first,
 +	// "tail" runs last. TCXPriority overrides it when non-zero.
 +	TCXPriority          EBPFTCPriority                   `json:"tcx_priority,omitempty"`
@@ -134,21 +134,22 @@ index e427125..d435e90 100644
  	}))
  }
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
-index 8c3848f..d856d04 100644
+index 8c3848f..1beda49 100644
 --- a/protocol/ebpf/inbound.go
 +++ b/protocol/ebpf/inbound.go
-@@ -29,6 +29,10 @@ const (
+@@ -29,6 +29,11 @@ const (
  	dnsModeRespectPolicy         = "respect_policy"
  	dnsModeOff                   = "off"
  	defaultTCPriority            = 1
 +
 +	deliveryVeth   = "veth"
 +	deliveryNetkit = "netkit"
++	deliveryNetkitL3 = "netkit-l3"
 +	deliveryAuto   = "auto"
  )
  
  var (
-@@ -104,6 +108,9 @@ type Inbound struct {
+@@ -104,6 +109,9 @@ type Inbound struct {
  	localBypassExclude        []netip.Prefix
  	sharedBypassExclude       []netip.Prefix
  	tcPriority                uint16
@@ -158,7 +159,7 @@ index 8c3848f..d856d04 100644
  	networkGeneration         uint64
  	fakeIPIPv4Prefix          netip.Prefix
  	fakeIPIPv6Prefix          netip.Prefix
-@@ -282,6 +289,37 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -282,6 +290,37 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  			return nil, E.New("eBPF self-bypass sockets were not prepared")
  		}
  	}
@@ -166,7 +167,7 @@ index 8c3848f..d856d04 100644
 +	if err != nil {
 +		return nil, err
 +	}
-+	if (localDelivery == deliveryNetkit || localDelivery == deliveryAuto) &&
++	if (localDelivery == deliveryNetkit || localDelivery == deliveryNetkitL3 || localDelivery == deliveryAuto) &&
 +		(!localEnabled || localDataPlane != localDataPlaneSocketAssign) {
 +		return nil, E.New("local.delivery=", localDelivery, " requires local.enabled and local.data_plane=socket_assign")
 +	}
@@ -174,7 +175,7 @@ index 8c3848f..d856d04 100644
 +	if err != nil {
 +		return nil, err
 +	}
-+	if (sharedDelivery == deliveryNetkit || sharedDelivery == deliveryAuto) &&
++	if (sharedDelivery == deliveryNetkit || sharedDelivery == deliveryNetkitL3 || sharedDelivery == deliveryAuto) &&
 +		(!sharedEnabled || sharedDataPlane != sharedDataPlaneSocketAssign) {
 +		return nil, E.New("shared.delivery=", sharedDelivery, " requires shared.enabled and shared.data_plane=socket_assign")
 +	}
@@ -196,7 +197,7 @@ index 8c3848f..d856d04 100644
  	inbound := &Inbound{
  		Adapter:        inbound.NewAdapter(C.TypeEBPF, tag),
  		ctx:            ctx,
-@@ -312,6 +350,9 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -312,6 +351,9 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  		localBypassExclude:  localBypassExclude,
  		sharedBypassExclude: sharedBypassExclude,
  		tcPriority:          uint16(options.TCPriority),
@@ -206,7 +207,7 @@ index 8c3848f..d856d04 100644
  		sharedIncludeMAC:    sharedIncludeMAC,
  		sharedExcludeMAC:    sharedExcludeMAC,
  		localPolicy: localUIDPolicy{
-@@ -404,3 +445,53 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
+@@ -404,3 +446,53 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
  		break
  	}
  }
@@ -215,7 +216,7 @@ index 8c3848f..d856d04 100644
 +	switch value {
 +	case "", deliveryVeth:
 +		return deliveryVeth, nil
-+	case deliveryNetkit, deliveryAuto:
++	case deliveryNetkit, deliveryNetkitL3, deliveryAuto:
 +		return value, nil
 +	default:
 +		return "", E.New("unknown eBPF delivery: ", value)
