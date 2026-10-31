@@ -318,6 +318,24 @@ jobs:
           cache: true
           cache-dependency-path: src/go.sum
 
+      # 构建前自证：打印实际使用的模块目录与对象哈希，
+      # 避免「补丁/对象没进产物」这类问题再次静默发生。
+      - name: Verify prepared objects
+        run: |
+          set -euo pipefail
+          echo "go.mod replace:"
+          grep -n 'CHIZI-0618/sing-ebpf' go.mod || true
+          module_dir="$(go list -m -f '{{.Dir}}' github.com/CHIZI-0618/sing-ebpf)"
+          echo "module dir: ${module_dir}"
+          object="${module_dir}/internal/bpfgen/tc_bpfel.o"
+          ls -l "${object}"
+          sha256sum "${object}"
+          case "$(sha256sum "${object}" | cut -d' ' -f1)" in
+            # 上游模块自带的原始对象：出现它说明补丁/生成完全没生效
+            1c00f14a*) echo "::error::build resolved the upstream bpfgen object (patches not applied)"; exit 1 ;;
+            *) echo "object differs from upstream: patched objects are in use" ;;
+          esac
+
       - name: Build
         run: |
           set -xeuo pipefail
