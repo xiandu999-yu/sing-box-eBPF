@@ -1,0 +1,276 @@
+diff --git a/adapter/ebpf.go b/adapter/ebpf.go
+index 7ec6120..a694eee 100644
+--- a/adapter/ebpf.go
++++ b/adapter/ebpf.go
+@@ -77,6 +77,7 @@ type EBPFRuntimeDiagnostics struct {
+ 	TCBackendMode                 string
+ 	TCListenerLookupMode          string
+ 	TCAttachmentMode              string
++	TCDeliveryKind                string
+ 	TCDeliveryInterface           string
+ 	TCNetworkNamespace            string
+ 	TCDeliveryInterfaceIndex      int
+diff --git a/cmd/sing-box/cmd_tools_ebpf.go b/cmd/sing-box/cmd_tools_ebpf.go
+index eadef9e..f0fd6be 100644
+--- a/cmd/sing-box/cmd_tools_ebpf.go
++++ b/cmd/sing-box/cmd_tools_ebpf.go
+@@ -7,6 +7,7 @@ import (
+ 	"os"
+ 
+ 	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
++	ebpfRuntime "github.com/CHIZI-0618/sing-ebpf/runtime"
+ 	"github.com/sagernet/sing-box/log"
+ 
+ 	"github.com/spf13/cobra"
+@@ -24,6 +25,7 @@ var (
+ 	commandEBPFStatusJSON       bool
+ 	commandEBPFStatusFakeIPICMP bool
+ 	commandEBPFStatusProcess    bool
++	commandEBPFStatusDelivery   string
+ )
+ 
+ var commandEBPF = &cobra.Command{
+@@ -54,6 +56,7 @@ func init() {
+ 	commandEBPFStatus.Flags().BoolVar(&commandEBPFStatusJSON, "json", false, "Write the report as JSON")
+ 	commandEBPFStatus.Flags().BoolVar(&commandEBPFStatusFakeIPICMP, "fakeip-icmp", false, "Also inspect fakeip_icmp=reply support")
+ 	commandEBPFStatus.Flags().BoolVar(&commandEBPFStatusProcess, "process-tracking", false, "Also inspect optional process tracking support")
++	commandEBPFStatus.Flags().StringVar(&commandEBPFStatusDelivery, "probe-delivery", "", "Create and remove a delivery pair of this kind: veth, netkit or auto")
+ 	commandEBPF.AddCommand(commandEBPFStatus)
+ 	commandTools.AddCommand(commandEBPF)
+ }
+@@ -64,6 +67,13 @@ func runEBPFStatus() error {
+ 	if commandEBPFStatusInterface != "" {
+ 		interfaceNames = []string{commandEBPFStatusInterface}
+ 	}
++	if commandEBPFStatusDelivery != "" {
++		actual, probeErr := ebpfRuntime.ProbeDelivery(commandEBPFStatusDelivery)
++		if probeErr != nil {
++			return fmt.Errorf("probe delivery %s: %w", commandEBPFStatusDelivery, probeErr)
++		}
++		fmt.Println("delivery probe: created", actual)
++	}
+ 	report, err := commonEBPF.ProbeKernel(commonEBPF.KernelProbeOptions{
+ 		Mode:                mode,
+ 		LocalDataPlane:      commonEBPF.KernelProbeDataPlane(commandEBPFStatusLocal),
+diff --git a/option/ebpf.go b/option/ebpf.go
+index fb2474a..affe55c 100644
+--- a/option/ebpf.go
++++ b/option/ebpf.go
+@@ -30,6 +30,15 @@ type EBPFLocalOptions struct {
+ 	Enabled              *bool                            `json:"enabled,omitempty"`
+ 	DNSMode              string                           `json:"dns_mode,omitempty" enum:"hijack,respect_policy,off"`
+ 	DataPlane            string                           `json:"data_plane,omitempty" enum:"cgroup,socket_assign"`
++	// Delivery selects the socket-assignment delivery link: "" or "veth"
++	// (default) uses a veth pair, "netkit" uses a netkit pair in L2 mode
++	// (Linux 6.7+). Only valid when local.data_plane is socket_assign.
++	// local and shared share one delivery link, so both must agree.
++	Delivery             string                           `json:"delivery,omitempty" enum:"veth,netkit,auto"`
++	// TCXPosition picks the TCX chain end: "head" (default) runs first,
++	// "tail" runs last. TCXPriority overrides it when non-zero.
++	TCXPriority          EBPFTCPriority                   `json:"tcx_priority,omitempty"`
++	TCXPosition          string                           `json:"tcx_position,omitempty" enum:"head,tail"`
+ 	CgroupPath           string                           `json:"cgroup_path,omitempty"`
+ 	IPv6                 *bool                            `json:"ipv6,omitempty"`
+ 	BypassPrivateAddress *bool                            `json:"bypass_private_address,omitempty"`
+@@ -50,6 +59,14 @@ type EBPFSharedOptions struct {
+ 	Enabled              *bool                            `json:"enabled,omitempty"`
+ 	DefaultInterface     bool                             `json:"default_interface,omitempty"`
+ 	DataPlane            string                           `json:"data_plane,omitempty" enum:"socket_assign,packet_rewrite"`
++	// Delivery selects the socket-assignment delivery link: "" or "veth"
++	// (default) uses a veth pair, "netkit" uses a netkit pair in L2 mode
++	// (Linux 6.7+). Only valid when shared.data_plane is socket_assign.
++	Delivery             string                           `json:"delivery,omitempty" enum:"veth,netkit,auto"`
++	// TCXPosition picks the TCX chain end: "head" (default) runs first,
++	// "tail" runs last. TCXPriority overrides it when non-zero.
++	TCXPriority          EBPFTCPriority                   `json:"tcx_priority,omitempty"`
++	TCXPosition          string                           `json:"tcx_position,omitempty" enum:"head,tail"`
+ 	DNSMode              string                           `json:"dns_mode,omitempty" enum:"hijack,respect_policy,off"`
+ 	Interface            badoption.Listable[string]       `json:"interface,omitempty"`
+ 	IPv6                 *bool                            `json:"ipv6,omitempty"`
+diff --git a/protocol/ebpf/diagnostics.go b/protocol/ebpf/diagnostics.go
+index e427125..d435e90 100644
+--- a/protocol/ebpf/diagnostics.go
++++ b/protocol/ebpf/diagnostics.go
+@@ -143,6 +143,7 @@ type EBPFDiagnostics struct {
+ 	TCBackendMode                 string     `json:"tc_backend_mode,omitempty"`
+ 	TCListenerLookupMode          string     `json:"tc_listener_lookup_mode,omitempty"`
+ 	TCAttachmentMode              string     `json:"tc_attachment_mode,omitempty"`
++	TCDeliveryKind                string     `json:"tc_delivery_kind,omitempty"`
+ 	TCDeliveryInterface           string     `json:"tc_delivery_interface,omitempty"`
+ 	TCNetworkNamespace            string     `json:"tc_network_namespace,omitempty"`
+ 	TCDeliveryInterfaceIndex      int        `json:"tc_delivery_interface_index,omitempty"`
+@@ -402,6 +403,7 @@ func diagnosticsForAPI(diagnostics EBPFDiagnostics) adapter.EBPFRuntimeDiagnosti
+ 		TCBackendMode:                 diagnostics.TCBackendMode,
+ 		TCListenerLookupMode:          diagnostics.TCListenerLookupMode,
+ 		TCAttachmentMode:              diagnostics.TCAttachmentMode,
++		TCDeliveryKind:                diagnostics.TCDeliveryKind,
+ 		TCDeliveryInterface:           diagnostics.TCDeliveryInterface,
+ 		TCNetworkNamespace:            diagnostics.TCNetworkNamespace,
+ 		TCDeliveryInterfaceIndex:      diagnostics.TCDeliveryInterfaceIndex,
+@@ -645,6 +647,7 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
+ 		tc := tcDataPlane.TCDiagnostics()
+ 		diagnostics.TCListenerLookupMode = tc.ListenerLookupMode
+ 		diagnostics.TCAttachmentMode = tc.AttachmentMode
++		diagnostics.TCDeliveryKind = tc.DeliveryKind
+ 		diagnostics.TCDeliveryInterface = tc.NetworkInfo.DeliveryInterface
+ 		diagnostics.TCNetworkNamespace = tc.NetworkInfo.Namespace
+ 		diagnostics.TCDeliveryInterfaceIndex = tc.NetworkInfo.DeliveryInterfaceIndex
+@@ -1166,6 +1169,9 @@ func (i *Inbound) logStartupSummary() {
+ 		}
+ 	}
+ 
++	if i.delivery == deliveryAuto && diagnostics.TCDeliveryKind == deliveryVeth {
++		i.logger.Warn("netkit is unavailable on this kernel, delivery falls back to veth")
++	}
+ 	i.logger.Info("eBPF ", ebpfStructuredEvent("inbound_start", map[string]any{
+ 		"state":              diagnostics.State,
+ 		"configured_paths":   paths,
+@@ -1173,5 +1179,7 @@ func (i *Inbound) logStartupSummary() {
+ 		"waiting_paths":      waiting,
+ 		"waiting_interfaces": waitingInterfaces,
+ 		"fakeip_icmp":        fakeIPICMPSummary,
++		"delivery":           i.delivery,
++		"delivery_used":      diagnostics.TCDeliveryKind,
+ 	}))
+ }
+diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
+index 8c3848f..d856d04 100644
+--- a/protocol/ebpf/inbound.go
++++ b/protocol/ebpf/inbound.go
+@@ -29,6 +29,10 @@ const (
+ 	dnsModeRespectPolicy         = "respect_policy"
+ 	dnsModeOff                   = "off"
+ 	defaultTCPriority            = 1
++
++	deliveryVeth   = "veth"
++	deliveryNetkit = "netkit"
++	deliveryAuto   = "auto"
+ )
+ 
+ var (
+@@ -104,6 +108,9 @@ type Inbound struct {
+ 	localBypassExclude        []netip.Prefix
+ 	sharedBypassExclude       []netip.Prefix
+ 	tcPriority                uint16
++	tcxPriority               uint16
++	tcxPosition               string
++	delivery                  string
+ 	networkGeneration         uint64
+ 	fakeIPIPv4Prefix          netip.Prefix
+ 	fakeIPIPv6Prefix          netip.Prefix
+@@ -282,6 +289,37 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+ 			return nil, E.New("eBPF self-bypass sockets were not prepared")
+ 		}
+ 	}
++	localDelivery, err := normalizeDelivery(options.Local.Delivery)
++	if err != nil {
++		return nil, err
++	}
++	if (localDelivery == deliveryNetkit || localDelivery == deliveryAuto) &&
++		(!localEnabled || localDataPlane != localDataPlaneSocketAssign) {
++		return nil, E.New("local.delivery=", localDelivery, " requires local.enabled and local.data_plane=socket_assign")
++	}
++	sharedDelivery, err := normalizeDelivery(options.Shared.Delivery)
++	if err != nil {
++		return nil, err
++	}
++	if (sharedDelivery == deliveryNetkit || sharedDelivery == deliveryAuto) &&
++		(!sharedEnabled || sharedDataPlane != sharedDataPlaneSocketAssign) {
++		return nil, E.New("shared.delivery=", sharedDelivery, " requires shared.enabled and shared.data_plane=socket_assign")
++	}
++	if options.Local.Delivery != "" && options.Shared.Delivery != "" &&
++		localDelivery != sharedDelivery {
++		return nil, E.New("local.delivery (", localDelivery, ") and shared.delivery (",
++			sharedDelivery, ") differ, but both scopes share one delivery link")
++	}
++	delivery := deliveryVeth
++	if options.Local.Delivery != "" {
++		delivery = localDelivery
++	} else if options.Shared.Delivery != "" {
++		delivery = sharedDelivery
++	}
++	tcxPriority, tcxPosition, err := resolveTCXOrder(options)
++	if err != nil {
++		return nil, err
++	}
+ 	inbound := &Inbound{
+ 		Adapter:        inbound.NewAdapter(C.TypeEBPF, tag),
+ 		ctx:            ctx,
+@@ -312,6 +350,9 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+ 		localBypassExclude:  localBypassExclude,
+ 		sharedBypassExclude: sharedBypassExclude,
+ 		tcPriority:          uint16(options.TCPriority),
++		tcxPriority:         tcxPriority,
++		tcxPosition:         tcxPosition,
++		delivery:            delivery,
+ 		sharedIncludeMAC:    sharedIncludeMAC,
+ 		sharedExcludeMAC:    sharedExcludeMAC,
+ 		localPolicy: localUIDPolicy{
+@@ -404,3 +445,53 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
+ 		break
+ 	}
+ }
++
++func normalizeDelivery(value string) (string, error) {
++	switch value {
++	case "", deliveryVeth:
++		return deliveryVeth, nil
++	case deliveryNetkit, deliveryAuto:
++		return value, nil
++	default:
++		return "", E.New("unknown eBPF delivery: ", value)
++	}
++}
++
++// resolveTCXOrder merges the per-scope TCX order. Both scopes share the same
++// attachments backend, so explicit values must agree.
++func resolveTCXOrder(options option.EBPFInboundOptions) (uint16, string, error) {
++	for scope, position := range map[string]string{
++		"local":  options.Local.TCXPosition,
++		"shared": options.Shared.TCXPosition,
++	} {
++		switch position {
++		case "", "head", "tail":
++		default:
++			return 0, "", E.New(scope, ".tcx_position must be head or tail: ", position)
++		}
++	}
++	if options.Local.TCXPriority != 0 && options.Shared.TCXPriority != 0 &&
++		options.Local.TCXPriority != options.Shared.TCXPriority {
++		return 0, "", E.New("local.tcx_priority (", options.Local.TCXPriority,
++			") and shared.tcx_priority (", options.Shared.TCXPriority, ") differ")
++	}
++	if options.Local.TCXPosition != "" && options.Shared.TCXPosition != "" &&
++		options.Local.TCXPosition != options.Shared.TCXPosition {
++		return 0, "", E.New("local.tcx_position (", options.Local.TCXPosition,
++			") and shared.tcx_position (", options.Shared.TCXPosition, ") differ")
++	}
++	priority := uint16(options.Local.TCXPriority)
++	if priority == 0 {
++		priority = uint16(options.Shared.TCXPriority)
++	}
++	// 0 表示没显式指定优先级，由 tcx_position 决定锚点；不要在这里兜底成 1，
++	// 否则 runtime 会一直走优先级排序，链首/链尾永远不生效。
++	position := options.Local.TCXPosition
++	if position == "" {
++		position = options.Shared.TCXPosition
++	}
++	if position == "" {
++		position = "head"
++	}
++	return priority, position, nil
++}
+diff --git a/protocol/ebpf/inbound_lifecycle.go b/protocol/ebpf/inbound_lifecycle.go
+index d7fadb9..ed62966 100644
+--- a/protocol/ebpf/inbound_lifecycle.go
++++ b/protocol/ebpf/inbound_lifecycle.go
+@@ -116,6 +116,9 @@ func (i *Inbound) startInbound() error {
+ 		EnableSharedIPv6: sharedSocketAssignEnabled && i.sharedIPv6,
+ 		EnableTCP:        i.enableTCP,
+ 		EnableUDP:        i.enableUDP,
++		Delivery:         i.delivery,
++		TCXPriority:      i.tcxPriority,
++		TCXPosition:      i.tcxPosition,
+ 		Policy:           i.compiledPolicy,
+ 		SelfBypass:       i.selfBypass,
+ 		TrackProcess:     i.processTracker != nil,
