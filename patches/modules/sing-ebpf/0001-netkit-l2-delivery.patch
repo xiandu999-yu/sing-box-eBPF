@@ -504,7 +504,7 @@ index 86c87a4..9992805 100644
  	for _, attached := range programs {
  		other, marked, err := tcxProgramOrder(attached.ID)
 diff --git a/native/tc_isolation.h b/native/tc_isolation.h
-index 5cccc00..cf2609b 100644
+index 5cccc00..12f12de 100644
 --- a/native/tc_isolation.h
 +++ b/native/tc_isolation.h
 @@ -133,14 +133,14 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
@@ -524,7 +524,7 @@ index 5cccc00..cf2609b 100644
      struct bpf_sock *socket;
      if (!udp_only && flow.protocol == IPPROTO_TCP_VALUE) {
          socket = legacy ? lookup_tcp_socket_legacy(skb, control, &flow) : lookup_tcp_socket(skb, &flow);
-@@ -174,11 +174,20 @@ INLINE int isolated_delivery(struct __sk_buff *skb, bool legacy, bool udp_only)
+@@ -174,14 +174,22 @@ INLINE int isolated_delivery(struct __sk_buff *skb, bool legacy, bool udp_only)
  }
  
  SEC("classifier/isolated_delivery")
@@ -536,7 +536,9 @@ index 5cccc00..cf2609b 100644
  SEC("classifier/isolated_delivery_udp")
 -int sing_ebpf_tc_isolated_delivery_udp(struct __sk_buff *skb) { return isolated_delivery(skb, true, true); }
 +int sing_ebpf_tc_isolated_delivery_udp(struct __sk_buff *skb) { return isolated_delivery(skb, true, true, true); }
-+
+ 
+-SEC("classifier/isolated_return")
+-int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
 +// L3 delivery: netkit in L3 mode drops L2 framing, so the flow is parsed from
 +// the IP header instead of the Ethernet header.
 +SEC("classifier/isolated_delivery_l3")
@@ -545,9 +547,43 @@ index 5cccc00..cf2609b 100644
 +int sing_ebpf_tc_isolated_delivery_l3_legacy(struct __sk_buff *skb) { return isolated_delivery(skb, true, false, false); }
 +SEC("classifier/isolated_delivery_l3_udp")
 +int sing_ebpf_tc_isolated_delivery_l3_udp(struct __sk_buff *skb) { return isolated_delivery(skb, true, true, false); }
- 
- SEC("classifier/isolated_return")
- int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
++
++INLINE int isolated_return(struct __sk_buff *skb, bool ethernet) {
+     const struct sb_tc_control *control = load_control();
+     if (control == 0 || control->enabled == 0U) return TC_ACT_SHOT;
+     struct sb_tc_assign_key flow;
+@@ -191,7 +199,21 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
+     void *end = (void *)(long)skb->data_end;
+     __u16 protocol;
+     __u32 offset;
+-    if (!parse_ethernet(data, end, &protocol, &offset, mac)) return TC_ACT_SHOT;
++    if (ethernet) {
++        if (!parse_ethernet(data, end, &protocol, &offset, mac)) return TC_ACT_SHOT;
++    } else {
++        // L3: no L2 header, the IP version byte selects the parser.
++        if (data + 1 > end) return TC_ACT_SHOT;
++        __u8 version = (*(volatile __u8 *)data) >> 4;
++        offset = 0;
++        if (version == 4) {
++            protocol = ETH_P_IP_VALUE;
++        } else if (version == 6) {
++            protocol = ETH_P_IPV6_VALUE;
++        } else {
++            return TC_ACT_SHOT;
++        }
++    }
+     if (protocol == ETH_P_IP_VALUE) {
+         if (fill_ipv4_key(data, end, offset, control, &flow, &fragment, 0) != SB_TC_PARSE_FLOW) return TC_ACT_SHOT;
+     } else if (protocol == ETH_P_IPV6_VALUE) {
+@@ -232,3 +254,8 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
+     skb->mark = 0U;
+     return redirect(value.ifindex, (value.flags & 0xffU) == SB_TC_PATH_DELIVERY ? BPF_F_INGRESS : 0U);
+ }
++
++SEC("classifier/isolated_return")
++int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) { return isolated_return(skb, true); }
++SEC("classifier/isolated_return_l3")
++int sing_ebpf_tc_isolated_return_l3(struct __sk_buff *skb) { return isolated_return(skb, false); }
 diff --git a/runtime/api.go b/runtime/api.go
 index e21cb55..d51c68a 100644
 --- a/runtime/api.go
