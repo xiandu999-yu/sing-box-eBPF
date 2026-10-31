@@ -1,0 +1,1570 @@
+diff --git a/api.go b/api.go
+index cdf7c4b..98b2289 100644
+--- a/api.go
++++ b/api.go
+@@ -250,6 +250,14 @@ type TCConfig struct {
+ 	EnableTCP          bool
+ 	EnableUDP          bool
+ 	DeliveryInterface  uint32
++	// Delivery selects the socket-assignment delivery link: "" or "veth"
++	// (default) keeps the veth pair, "netkit" uses a netkit pair in L2 mode.
++	Delivery           string
++	// TCXPriority orders TCX programs on the hook; lower runs first.
++	TCXPriority        uint16
++	// TCXPosition picks the chain end when TCXPriority is unset:
++	// "head" runs first, "tail" runs last.
++	TCXPosition        string
+ 	Policy             CompiledPolicy
+ 	RoutingMark        uint32
+ 	SelfBypass         *SelfBypass
+@@ -273,6 +281,9 @@ func PrepareTC(config TCConfig) (*TCBackend, error) {
+ 		EnableTCP:          config.EnableTCP,
+ 		EnableUDP:          config.EnableUDP,
+ 		DeliveryInterface:  config.DeliveryInterface,
++		Delivery:           config.Delivery,
++		TCXPriority:        config.TCXPriority,
++		TCXPosition:        config.TCXPosition,
+ 		Policy:             config.Policy,
+ 		RoutingMark:        config.RoutingMark,
+ 		TrackProcess:       config.TrackProcess,
+diff --git a/internal/bpfgen/manifest.txt b/internal/bpfgen/manifest.txt
+index 02df9ba..a632096 100644
+--- a/internal/bpfgen/manifest.txt
++++ b/internal/bpfgen/manifest.txt
+@@ -17,8 +17,8 @@ a19b3feb05e4fd510542be3ca71ce6c00584cde6b4c49652aa0ac4e1795e3c80  native/shared_
+ 1037740ffb575c36b2f8318539dd4a38bf9bf71f5d045d521baae9dcb5af362c  native/shared_network_packet.h
+ 05e1105394bc47665ea248b73eac1e7ff6d46c43ea71e8f44c0fc720dcf8024f  native/shared_network_policy.h
+ 46b6e8dc3df61af4adf4b5fcd29b99b1e1fd8c62b50087b06fb03dfd938c51a9  native/shared_network_rewrite.h
+-9c8877e72b99da75e2c54708049ebbecc869d2c7483d97bbc32958ab1c99435b  native/tc.bpf.c
+-d9f5ab6d9e3b0d57afc269e2bd18370922e0281011003af86752992cda1ff858  native/tc_isolation.h
++5345dfc7ad69bca5be7c9506704b208011d151446cae00ed94454212c71535af  native/tc.bpf.c
++7d1921c5d4259717a4b678f59c889eff107d6caac7f2208dea5a485894915fd2  native/tc_isolation.h
+ 6a466f1796e7dd0970b09522a05907c7f821c14c9f80da1427d7d655a2a62a04  internal/bpfgen/cgroup_bpfeb.o
+ 9f63caa24534356241237db1b668efcb99ef20c37d11c56f05483cf7f423212b  internal/bpfgen/cgroup_bpfel.o
+ 41f9d88e8289ea505a0e85eab7a2d59ece87ed3a03585b826e4c1f264f003eaa  internal/bpfgen/cgroup_coarse_bpfeb.o
+@@ -27,5 +27,5 @@ d9f5ab6d9e3b0d57afc269e2bd18370922e0281011003af86752992cda1ff858  native/tc_isol
+ deec3bdcefbb0d78015529b3130127d14f330e6e36d78ee767ef3d61d4174b03  internal/bpfgen/icmp_echo_reply_bpfel.o
+ 1a28be2cc18ff5d12fec051526ff40dbeda0379bce225e64f297164f5febf1b7  internal/bpfgen/shared_network_bpfeb.o
+ 2649f2b0cce5fcb67c4cf9d9a1f0fe68d5d07088878393fdf1bf5d63c904ebd9  internal/bpfgen/shared_network_bpfel.o
+-6b242024d88bdf0b13f32b54fd798a8107e35380751d121733c484566e9b3463  internal/bpfgen/tc_bpfeb.o
+-1c00f14afcc6163aa6adbbf82117f26a792f44b3a0d6f8075ecb34852d8183ce  internal/bpfgen/tc_bpfel.o
++f64aad99836468e8b362419eacc1e84f188f198d34d310bb92d69735d2743684  internal/bpfgen/tc_bpfeb.o
++e250216cda92c8cf096708d8c0151527f46442e0e5628aa7775db812005b15af  internal/bpfgen/tc_bpfel.o
+diff --git a/internal/bpfgen/tc_bpfeb.go b/internal/bpfgen/tc_bpfeb.go
+index 978f80a..7c09ad3 100644
+--- a/internal/bpfgen/tc_bpfeb.go
++++ b/internal/bpfgen/tc_bpfeb.go
+@@ -43,9 +43,13 @@ const (
+ 	TCMapTcStats                                 = "tc_stats"
+ 	TCMapTcUidPolicy                             = "tc_uid_policy"
+ 	TCProgSingEbpfTcIsolatedDelivery             = "sing_ebpf_tc_isolated_delivery"
++	TCProgSingEbpfTcIsolatedDeliveryL3           = "sing_ebpf_tc_isolated_delivery_l3"
++	TCProgSingEbpfTcIsolatedDeliveryL3Legacy     = "sing_ebpf_tc_isolated_delivery_l3_legacy"
++	TCProgSingEbpfTcIsolatedDeliveryL3Udp        = "sing_ebpf_tc_isolated_delivery_l3_udp"
+ 	TCProgSingEbpfTcIsolatedDeliveryLegacy       = "sing_ebpf_tc_isolated_delivery_legacy"
+ 	TCProgSingEbpfTcIsolatedDeliveryUdp          = "sing_ebpf_tc_isolated_delivery_udp"
+ 	TCProgSingEbpfTcIsolatedReturn               = "sing_ebpf_tc_isolated_return"
++	TCProgSingEbpfTcIsolatedReturnL3             = "sing_ebpf_tc_isolated_return_l3"
+ 	TCProgSingEbpfTcLocalEthernetIsolated        = "sing_ebpf_tc_local_ethernet_isolated"
+ 	TCProgSingEbpfTcLocalEthernetIsolatedProcess = "sing_ebpf_tc_local_ethernet_isolated_process"
+ 	TCProgSingEbpfTcLocalRawIsolated             = "sing_ebpf_tc_local_raw_isolated"
+@@ -97,9 +101,13 @@ type TCSpecs struct {
+ // It can be passed ebpf.CollectionSpec.Assign.
+ type TCProgramSpecs struct {
+ 	SingEbpfTcIsolatedDelivery             *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_delivery"`
++	SingEbpfTcIsolatedDeliveryL3           *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_delivery_l3"`
++	SingEbpfTcIsolatedDeliveryL3Legacy     *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_delivery_l3_legacy"`
++	SingEbpfTcIsolatedDeliveryL3Udp        *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_delivery_l3_udp"`
+ 	SingEbpfTcIsolatedDeliveryLegacy       *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_delivery_legacy"`
+ 	SingEbpfTcIsolatedDeliveryUdp          *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_delivery_udp"`
+ 	SingEbpfTcIsolatedReturn               *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_return"`
++	SingEbpfTcIsolatedReturnL3             *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_return_l3"`
+ 	SingEbpfTcLocalEthernetIsolated        *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_ethernet_isolated"`
+ 	SingEbpfTcLocalEthernetIsolatedProcess *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_ethernet_isolated_process"`
+ 	SingEbpfTcLocalRawIsolated             *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_raw_isolated"`
+@@ -236,9 +244,13 @@ type TCVariables struct {
+ // It can be passed to LoadTCObjects or ebpf.CollectionSpec.LoadAndAssign.
+ type TCPrograms struct {
+ 	SingEbpfTcIsolatedDelivery             *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_delivery"`
++	SingEbpfTcIsolatedDeliveryL3           *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_delivery_l3"`
++	SingEbpfTcIsolatedDeliveryL3Legacy     *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_delivery_l3_legacy"`
++	SingEbpfTcIsolatedDeliveryL3Udp        *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_delivery_l3_udp"`
+ 	SingEbpfTcIsolatedDeliveryLegacy       *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_delivery_legacy"`
+ 	SingEbpfTcIsolatedDeliveryUdp          *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_delivery_udp"`
+ 	SingEbpfTcIsolatedReturn               *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_return"`
++	SingEbpfTcIsolatedReturnL3             *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_return_l3"`
+ 	SingEbpfTcLocalEthernetIsolated        *ebpf.Program `ebpf:"sing_ebpf_tc_local_ethernet_isolated"`
+ 	SingEbpfTcLocalEthernetIsolatedProcess *ebpf.Program `ebpf:"sing_ebpf_tc_local_ethernet_isolated_process"`
+ 	SingEbpfTcLocalRawIsolated             *ebpf.Program `ebpf:"sing_ebpf_tc_local_raw_isolated"`
+@@ -250,9 +262,13 @@ type TCPrograms struct {
+ func (p *TCPrograms) Close() error {
+ 	return _TCClose(
+ 		p.SingEbpfTcIsolatedDelivery,
++		p.SingEbpfTcIsolatedDeliveryL3,
++		p.SingEbpfTcIsolatedDeliveryL3Legacy,
++		p.SingEbpfTcIsolatedDeliveryL3Udp,
+ 		p.SingEbpfTcIsolatedDeliveryLegacy,
+ 		p.SingEbpfTcIsolatedDeliveryUdp,
+ 		p.SingEbpfTcIsolatedReturn,
++		p.SingEbpfTcIsolatedReturnL3,
+ 		p.SingEbpfTcLocalEthernetIsolated,
+ 		p.SingEbpfTcLocalEthernetIsolatedProcess,
+ 		p.SingEbpfTcLocalRawIsolated,
+diff --git a/internal/bpfgen/tc_bpfeb.o b/internal/bpfgen/tc_bpfeb.o
+index 4005d7dfcb7db530ce1382154e88f51a7c706040..3dd34eebf6875be2ff9bd66460736ac1a1cc5633 100644
+GIT binary patch
+delta 18356
+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
+Kkx*`?hW-a;K8g?k
+
+delta 4893
+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
+
+diff --git a/internal/bpfgen/tc_bpfel.go b/internal/bpfgen/tc_bpfel.go
+index 92dd722..7d01bd8 100644
+--- a/internal/bpfgen/tc_bpfel.go
++++ b/internal/bpfgen/tc_bpfel.go
+@@ -43,9 +43,13 @@ const (
+ 	TCMapTcStats                                 = "tc_stats"
+ 	TCMapTcUidPolicy                             = "tc_uid_policy"
+ 	TCProgSingEbpfTcIsolatedDelivery             = "sing_ebpf_tc_isolated_delivery"
++	TCProgSingEbpfTcIsolatedDeliveryL3           = "sing_ebpf_tc_isolated_delivery_l3"
++	TCProgSingEbpfTcIsolatedDeliveryL3Legacy     = "sing_ebpf_tc_isolated_delivery_l3_legacy"
++	TCProgSingEbpfTcIsolatedDeliveryL3Udp        = "sing_ebpf_tc_isolated_delivery_l3_udp"
+ 	TCProgSingEbpfTcIsolatedDeliveryLegacy       = "sing_ebpf_tc_isolated_delivery_legacy"
+ 	TCProgSingEbpfTcIsolatedDeliveryUdp          = "sing_ebpf_tc_isolated_delivery_udp"
+ 	TCProgSingEbpfTcIsolatedReturn               = "sing_ebpf_tc_isolated_return"
++	TCProgSingEbpfTcIsolatedReturnL3             = "sing_ebpf_tc_isolated_return_l3"
+ 	TCProgSingEbpfTcLocalEthernetIsolated        = "sing_ebpf_tc_local_ethernet_isolated"
+ 	TCProgSingEbpfTcLocalEthernetIsolatedProcess = "sing_ebpf_tc_local_ethernet_isolated_process"
+ 	TCProgSingEbpfTcLocalRawIsolated             = "sing_ebpf_tc_local_raw_isolated"
+@@ -97,9 +101,13 @@ type TCSpecs struct {
+ // It can be passed ebpf.CollectionSpec.Assign.
+ type TCProgramSpecs struct {
+ 	SingEbpfTcIsolatedDelivery             *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_delivery"`
++	SingEbpfTcIsolatedDeliveryL3           *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_delivery_l3"`
++	SingEbpfTcIsolatedDeliveryL3Legacy     *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_delivery_l3_legacy"`
++	SingEbpfTcIsolatedDeliveryL3Udp        *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_delivery_l3_udp"`
+ 	SingEbpfTcIsolatedDeliveryLegacy       *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_delivery_legacy"`
+ 	SingEbpfTcIsolatedDeliveryUdp          *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_delivery_udp"`
+ 	SingEbpfTcIsolatedReturn               *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_return"`
++	SingEbpfTcIsolatedReturnL3             *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_isolated_return_l3"`
+ 	SingEbpfTcLocalEthernetIsolated        *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_ethernet_isolated"`
+ 	SingEbpfTcLocalEthernetIsolatedProcess *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_ethernet_isolated_process"`
+ 	SingEbpfTcLocalRawIsolated             *ebpf.ProgramSpec `ebpf:"sing_ebpf_tc_local_raw_isolated"`
+@@ -236,9 +244,13 @@ type TCVariables struct {
+ // It can be passed to LoadTCObjects or ebpf.CollectionSpec.LoadAndAssign.
+ type TCPrograms struct {
+ 	SingEbpfTcIsolatedDelivery             *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_delivery"`
++	SingEbpfTcIsolatedDeliveryL3           *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_delivery_l3"`
++	SingEbpfTcIsolatedDeliveryL3Legacy     *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_delivery_l3_legacy"`
++	SingEbpfTcIsolatedDeliveryL3Udp        *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_delivery_l3_udp"`
+ 	SingEbpfTcIsolatedDeliveryLegacy       *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_delivery_legacy"`
+ 	SingEbpfTcIsolatedDeliveryUdp          *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_delivery_udp"`
+ 	SingEbpfTcIsolatedReturn               *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_return"`
++	SingEbpfTcIsolatedReturnL3             *ebpf.Program `ebpf:"sing_ebpf_tc_isolated_return_l3"`
+ 	SingEbpfTcLocalEthernetIsolated        *ebpf.Program `ebpf:"sing_ebpf_tc_local_ethernet_isolated"`
+ 	SingEbpfTcLocalEthernetIsolatedProcess *ebpf.Program `ebpf:"sing_ebpf_tc_local_ethernet_isolated_process"`
+ 	SingEbpfTcLocalRawIsolated             *ebpf.Program `ebpf:"sing_ebpf_tc_local_raw_isolated"`
+@@ -250,9 +262,13 @@ type TCPrograms struct {
+ func (p *TCPrograms) Close() error {
+ 	return _TCClose(
+ 		p.SingEbpfTcIsolatedDelivery,
++		p.SingEbpfTcIsolatedDeliveryL3,
++		p.SingEbpfTcIsolatedDeliveryL3Legacy,
++		p.SingEbpfTcIsolatedDeliveryL3Udp,
+ 		p.SingEbpfTcIsolatedDeliveryLegacy,
+ 		p.SingEbpfTcIsolatedDeliveryUdp,
+ 		p.SingEbpfTcIsolatedReturn,
++		p.SingEbpfTcIsolatedReturnL3,
+ 		p.SingEbpfTcLocalEthernetIsolated,
+ 		p.SingEbpfTcLocalEthernetIsolatedProcess,
+ 		p.SingEbpfTcLocalRawIsolated,
+diff --git a/internal/bpfgen/tc_bpfel.o b/internal/bpfgen/tc_bpfel.o
+index 096bdb1d1f8145c58da1a1121ee5e00f8bc966a1..49a19f8cfd8ae50d0699221ab87d706e306e8a5f 100644
+GIT binary patch
+delta 17328
+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
+
+delta 4668
+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
+
+diff --git a/internal/core/access.go b/internal/core/access.go
+index 711519b..d7684a2 100644
+--- a/internal/core/access.go
++++ b/internal/core/access.go
+@@ -73,6 +73,30 @@ func NewTCBackendHandle(backend *TCBackend) TCBackendHandle {
+ 	return TCBackendHandle{backend: backend}
+ }
+ 
++// DeliveryKind reports the requested socket-assignment delivery link kind.
++func (h TCBackendHandle) DeliveryKind() string {
++	if h.backend == nil {
++		return ""
++	}
++	return h.backend.delivery
++}
++
++// TCXPosition reports the configured TCX chain end ("head" or "tail").
++func (h TCBackendHandle) TCXPosition() string {
++	if h.backend == nil {
++		return ""
++	}
++	return h.backend.tcxPosition
++}
++
++// TCXPriority reports the configured TCX ordering priority.
++func (h TCBackendHandle) TCXPriority() uint16 {
++	if h.backend == nil {
++		return 0
++	}
++	return h.backend.tcxPriority
++}
++
+ func (h TCBackendHandle) tcBackend() *TCBackend {
+ 	return h.backend
+ }
+diff --git a/internal/core/diagnostics.go b/internal/core/diagnostics.go
+index 8c4079d..ec95418 100644
+--- a/internal/core/diagnostics.go
++++ b/internal/core/diagnostics.go
+@@ -44,5 +44,7 @@ type TCDiagnostics struct {
+ 	RetiredAttachmentCount int
+ 	RetiredDeliveryCount   int
+ 	Priority               uint16
++	// DeliveryKind is the delivery link actually created ("veth" or "netkit").
++	DeliveryKind           string
+ 	RequiresRebuild        bool
+ }
+diff --git a/internal/core/tc.go b/internal/core/tc.go
+index 3ec9cae..56a5cc8 100644
+--- a/internal/core/tc.go
++++ b/internal/core/tc.go
+@@ -101,6 +101,12 @@ type TCConfig struct {
+ 	EnableTCP          bool
+ 	EnableUDP          bool
+ 	DeliveryInterface  uint32
++	Delivery           string
++	// TCXPriority orders TCX programs on the hook; lower runs first.
++	TCXPriority        uint16
++	// TCXPosition picks the chain end when TCXPriority is unset:
++	// "head" runs first, "tail" runs last.
++	TCXPosition        string
+ 	Policy             CompiledPolicy
+ 	RoutingMark        uint32
+ 	SelfBypassMap      *CiliumEBPF.Map
+@@ -133,7 +139,7 @@ type tcControl struct {
+ 	ListenerPort      uint16
+ 	ReservedPolicy    [2]uint16
+ 	DeliveryMAC       MACAddress
+-	Reserved          uint16
++	DeliveryMode          uint16
+ }
+ 
+ type tcAssignKey struct {
+@@ -204,6 +210,9 @@ type TCBackend struct {
+ 	runtime                   *tcRuntime
+ 	tcpListenerMap            bool
+ 	programsExposed           bool
++	delivery                  string
++	tcxPriority               uint16
++	tcxPosition               string
+ 	control                   tcControl
+ 	controlMapFD              int
+ 	assignmentMapFD           int
+@@ -313,7 +322,12 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
+ 	if err != nil {
+ 		return nil, explainBPFPermissionError(err, memlockErr)
+ 	}
++	deliveryMode := uint16(0)
++	if config.Delivery == "netkit-l3" {
++		deliveryMode = 1
++	}
+ 	controlValue := tcControl{
++		DeliveryMode: deliveryMode,
+ 		Flags:             tcFlags(config, policy),
+ 		DeliveryInterface: config.DeliveryInterface,
+ 		RoutingMark:       config.RoutingMark,
+@@ -350,6 +364,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
+ 		controlMapFD:       maps["tc_control"].FD(),
+ 		assignmentMapFD:    maps["tc_assignment"].FD(),
+ 		assignmentCapacity: config.AssignmentCapacity,
++		delivery:           config.Delivery,
++		tcxPriority:        config.TCXPriority,
++		tcxPosition:        config.TCXPosition,
+ 		selfMapExternal:    config.EnableLocal && config.SelfBypassMap != nil,
+ 	}
+ 	// From here, backend owns maps and loadedPrograms: giving up on either of the
+@@ -426,12 +443,17 @@ func loadTCResources(config TCConfig, baseOverrides map[string]mapSpecOverride,
+ 		programIndexes = append(programIndexes, tcProgramSharedIngressEthernet, tcProgramSharedIngressRawIP)
+ 	}
+ 	delivery := "classifier/isolated_delivery"
++	returnSection := "classifier/isolated_return"
++	if config.Delivery == "netkit-l3" {
++		delivery += "_l3"
++		returnSection += "_l3"
++	}
+ 	if !config.EnableTCP {
+ 		delivery += "_udp"
+ 	} else if legacyTCP {
+ 		delivery += "_legacy"
+ 	}
+-	selections = append(selections, programSelection{section: delivery, kernelProgramName: kernelProgramNameTCDelivery}, programSelection{section: "classifier/isolated_return", kernelProgramName: "sb_tc_return"})
++	selections = append(selections, programSelection{section: delivery, kernelProgramName: kernelProgramNameTCDelivery}, programSelection{section: returnSection, kernelProgramName: "sb_tc_return"})
+ 	programIndexes = append(programIndexes, tcProgramDeliveryIngress, tcProgramIsolatedReturn)
+ 	loadedPrograms, err := loadObjectPrograms(loadTC, maps, selections)
+ 	if err != nil {
+@@ -639,7 +661,11 @@ func (b *TCBackend) useDirectTCPListenersLocked() error {
+ 			selections = append(selections, programSelection{section: section, kernelProgramName: name})
+ 		}
+ 	}
+-	add(tcProgramDeliveryIngress, "classifier/isolated_delivery_legacy", kernelProgramNameTCDelivery)
++	deliverySection := "classifier/isolated_delivery_legacy"
++	if b.control.DeliveryMode != 0 {
++		deliverySection = "classifier/isolated_delivery_l3_legacy"
++	}
++	add(tcProgramDeliveryIngress, deliverySection, kernelProgramNameTCDelivery)
+ 	programs, err := loadObjectPrograms(loadTC, b.runtime.maps, selections)
+ 	if err != nil {
+ 		return err
+@@ -1111,6 +1137,12 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
+ 	}
+ }
+ 
++func (b *TCBackend) DeliveryIngressProgram() *CiliumEBPF.Program {
++	return b.program(tcProgramDeliveryIngress)
++}
++func (b *TCBackend) IsolatedReturnProgram() *CiliumEBPF.Program {
++	return b.program(tcProgramIsolatedReturn)
++}
+ func (b *TCBackend) DeliveryIngressProgramFD() int { return b.programFD(tcProgramDeliveryIngress) }
+ func (b *TCBackend) IsolatedReturnProgramFD() int  { return b.programFD(tcProgramIsolatedReturn) }
+ 
+diff --git a/internal/core/tcx_order.go b/internal/core/tcx_order.go
+index 86c87a4..9992805 100644
+--- a/internal/core/tcx_order.go
++++ b/internal/core/tcx_order.go
+@@ -55,6 +55,17 @@ var (
+ // order. On a kernel without TCX it returns the same unsupported error as
+ // link.AttachTCX, which callers use to select the clsact fallback.
+ func AttachTCXOrdered(interfaceIndex int, attachType CiliumEBPF.AttachType, program *CiliumEBPF.Program, priority uint16) (link.Link, error) {
++	return attachTCXAt(interfaceIndex, attachType, program, priority, "")
++}
++
++// AttachTCXPositioned attaches program at an explicit chain position:
++// "head" runs before every existing program, including programs without a
++// priority marker; "tail" runs last; "" keeps the priority order.
++func AttachTCXPositioned(interfaceIndex int, attachType CiliumEBPF.AttachType, program *CiliumEBPF.Program, priority uint16, position string) (link.Link, error) {
++	return attachTCXAt(interfaceIndex, attachType, program, priority, position)
++}
++
++func attachTCXAt(interfaceIndex int, attachType CiliumEBPF.AttachType, program *CiliumEBPF.Program, priority uint16, position string) (link.Link, error) {
+ 	if program == nil {
+ 		return nil, E.New("TCX program is unavailable")
+ 	}
+@@ -81,9 +92,18 @@ func AttachTCXOrdered(interfaceIndex int, attachType CiliumEBPF.AttachType, prog
+ 			}
+ 			markerReady = true
+ 		}
+-		anchor, err := tcxPriorityAnchor(result.Programs, priority)
+-		if err != nil {
+-			return nil, E.Errors(ErrTCXOrderUnavailable, E.Cause(err, "read TCX priorities"))
++		var anchor link.Anchor
++		switch position {
++		case "head":
++			anchor = tcxHeadAnchor(result.Programs)
++		case "tail":
++			anchor = link.Tail()
++		default:
++			priorityAnchor, err := tcxPriorityAnchor(result.Programs, priority)
++			if err != nil {
++				return nil, E.Errors(ErrTCXOrderUnavailable, E.Cause(err, "read TCX priorities"))
++			}
++			anchor = priorityAnchor
+ 		}
+ 		attached, err := attachTCX(link.TCXOptions{
+ 			Interface:        interfaceIndex,
+@@ -104,6 +124,18 @@ func AttachTCXOrdered(interfaceIndex int, attachType CiliumEBPF.AttachType, prog
+ 	}
+ }
+ 
++// tcxHeadAnchor places the program before the first attached program, so it
++// runs first even when that program carries no priority marker.
++func tcxHeadAnchor(programs []link.AttachedProgram) link.Anchor {
++	for _, attached := range programs {
++		if linkID, linked := attached.LinkID(); linked {
++			return link.BeforeLinkByID(linkID)
++		}
++		return link.BeforeProgramByID(attached.ID)
++	}
++	return link.Tail()
++}
++
+ func tcxPriorityAnchor(programs []link.AttachedProgram, priority uint16) (link.Anchor, error) {
+ 	for _, attached := range programs {
+ 		other, marked, err := tcxProgramOrder(attached.ID)
+diff --git a/native/tc.bpf.c b/native/tc.bpf.c
+index a898f01..3bd9336 100644
+--- a/native/tc.bpf.c
++++ b/native/tc.bpf.c
+@@ -81,7 +81,10 @@
+ #define SB_TC_STAT_RETURN_UPDATE_FAILURE 5U
+ #define SB_TC_STAT_RETURN_CONFLICT 6U
+ #define SB_TC_STAT_RETURN_LOOKUP_FAILURE 7U
+-#define SB_TC_STAT_COUNT 8U
++// 临时诊断：L3 交付是否进入、去头是否成功
++#define SB_TC_STAT_DELIVERY_ENTER 8U
++#define SB_TC_STAT_DELIVERY_STRIPPED 9U
++#define SB_TC_STAT_COUNT 10U
+ 
+ struct sb_tc_control {
+     __u32 enabled;
+@@ -91,7 +94,7 @@ struct sb_tc_control {
+     __u16 listener_port;
+     __u16 reserved_policy[2];
+     __u8 delivery_mac[6];
+-    __u16 reserved;
++    __u16 delivery_mode;
+ };
+ 
+ struct sb_tc_uid_key {
+@@ -268,6 +271,8 @@ static long (*skb_store_bytes)(void *ctx, __u32 offset, const void *from, __u32
+     (void *)BPF_FUNC_skb_store_bytes;
+ static long (*skb_change_head)(void *ctx, __u32 length, __u64 flags) =
+     (void *)BPF_FUNC_skb_change_head;
++static long (*skb_adjust_room)(void *ctx, __s32 len_diff, __u32 mode, __u64 flags) =
++    (void *)BPF_FUNC_skb_adjust_room;
+ static struct bpf_sock *(*skc_lookup_tcp)(void *ctx, struct bpf_sock_tuple *tuple,
+     __u32 tuple_size, __u64 netns, __u64 flags) = (void *)BPF_FUNC_skc_lookup_tcp;
+ static struct bpf_sock *(*sk_lookup_udp)(void *ctx, struct bpf_sock_tuple *tuple,
+diff --git a/native/tc_isolation.h b/native/tc_isolation.h
+index 5cccc00..01919ad 100644
+--- a/native/tc_isolation.h
++++ b/native/tc_isolation.h
+@@ -64,7 +64,11 @@ INLINE __u32 assignment_record(const struct sb_tc_assign_key *flow, __u8 tcp_fla
+ }
+ 
+ INLINE int deliver_isolated(struct __sk_buff *skb, const struct sb_tc_control *control, bool ethernet) {
+-    if (ethernet) {
++    increment_stat(SB_TC_STAT_DELIVERY_ENTER);
++    if (control->delivery_mode != 0U) {
++        if (skb_adjust_room(skb, -(int)sizeof(struct ethernet_header), BPF_ADJ_ROOM_MAC, 0U) != 0) return TC_ACT_SHOT;
++        increment_stat(SB_TC_STAT_DELIVERY_STRIPPED);
++    } else if (ethernet) {
+         if (skb_store_bytes(skb, 0U, control->delivery_mac, 6U, 0U) != 0) return TC_ACT_SHOT;
+     } else {
+         struct ethernet_header header = {.protocol = skb->protocol};
+@@ -80,6 +84,7 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
+     const struct sb_tc_assign_key *flow, __u64 cookie, __u32 flags) {
+     bool record = (flags & SB_TC_REDIRECT_RECORD) != 0U;
+     flags &= ~SB_TC_REDIRECT_RECORD;
++    if (control->delivery_mode != 0U) flags &= ~SB_TC_RETURN_ETHERNET;
+     bool ethernet = (flags & SB_TC_RETURN_ETHERNET) != 0U;
+     __u8 path = flags & 0xffU;
+     __u64 now = ktime_get_ns();
+@@ -133,14 +138,14 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
+     return deliver_isolated(skb, control, ethernet);
+ }
+ 
+-INLINE int isolated_delivery(struct __sk_buff *skb, bool legacy, bool udp_only) {
++INLINE int isolated_delivery(struct __sk_buff *skb, bool legacy, bool udp_only, bool ethernet) {
+     const struct sb_tc_control *control = load_control();
+     if (control == 0 || control->enabled == 0U || skb->cb[0] != SB_TC_DELIVERY_MAGIC) return TC_ACT_SHOT;
+     skb->cb[0] = 0U;
+     struct sb_tc_assign_key flow;
+     __u8 mac[6];
+     if (parse_flow(skb, control, SB_TC_FLAG_LOCAL_IPV6 | SB_TC_FLAG_SHARED_IPV6,
+-            true, false, &flow, mac, 0) != SB_TC_PARSE_FLOW) return TC_ACT_SHOT;
++            ethernet, false, &flow, mac, 0) != SB_TC_PARSE_FLOW) return TC_ACT_SHOT;
+     struct bpf_sock *socket;
+     if (!udp_only && flow.protocol == IPPROTO_TCP_VALUE) {
+         socket = legacy ? lookup_tcp_socket_legacy(skb, control, &flow) : lookup_tcp_socket(skb, &flow);
+@@ -174,14 +179,22 @@ INLINE int isolated_delivery(struct __sk_buff *skb, bool legacy, bool udp_only)
+ }
+ 
+ SEC("classifier/isolated_delivery")
+-int sing_ebpf_tc_isolated_delivery(struct __sk_buff *skb) { return isolated_delivery(skb, false, false); }
++int sing_ebpf_tc_isolated_delivery(struct __sk_buff *skb) { return isolated_delivery(skb, false, false, true); }
+ SEC("classifier/isolated_delivery_legacy")
+-int sing_ebpf_tc_isolated_delivery_legacy(struct __sk_buff *skb) { return isolated_delivery(skb, true, false); }
++int sing_ebpf_tc_isolated_delivery_legacy(struct __sk_buff *skb) { return isolated_delivery(skb, true, false, true); }
+ SEC("classifier/isolated_delivery_udp")
+-int sing_ebpf_tc_isolated_delivery_udp(struct __sk_buff *skb) { return isolated_delivery(skb, true, true); }
++int sing_ebpf_tc_isolated_delivery_udp(struct __sk_buff *skb) { return isolated_delivery(skb, true, true, true); }
+ 
+-SEC("classifier/isolated_return")
+-int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
++// L3 delivery: netkit in L3 mode drops L2 framing, so the flow is parsed from
++// the IP header instead of the Ethernet header.
++SEC("classifier/isolated_delivery_l3")
++int sing_ebpf_tc_isolated_delivery_l3(struct __sk_buff *skb) { return isolated_delivery(skb, false, false, false); }
++SEC("classifier/isolated_delivery_l3_legacy")
++int sing_ebpf_tc_isolated_delivery_l3_legacy(struct __sk_buff *skb) { return isolated_delivery(skb, true, false, false); }
++SEC("classifier/isolated_delivery_l3_udp")
++int sing_ebpf_tc_isolated_delivery_l3_udp(struct __sk_buff *skb) { return isolated_delivery(skb, true, true, false); }
++
++INLINE int isolated_return(struct __sk_buff *skb, bool ethernet) {
+     const struct sb_tc_control *control = load_control();
+     if (control == 0 || control->enabled == 0U) return TC_ACT_SHOT;
+     struct sb_tc_assign_key flow;
+@@ -191,7 +204,21 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
+     void *end = (void *)(long)skb->data_end;
+     __u16 protocol;
+     __u32 offset;
+-    if (!parse_ethernet(data, end, &protocol, &offset, mac)) return TC_ACT_SHOT;
++    if (ethernet) {
++        if (!parse_ethernet(data, end, &protocol, &offset, mac)) return TC_ACT_SHOT;
++    } else {
++        // L3: no L2 header, the IP version byte selects the parser.
++        if (data + 1 > end) return TC_ACT_SHOT;
++        __u8 version = (*(volatile __u8 *)data) >> 4;
++        offset = 0;
++        if (version == 4) {
++            protocol = ETH_P_IP_VALUE;
++        } else if (version == 6) {
++            protocol = ETH_P_IPV6_VALUE;
++        } else {
++            return TC_ACT_SHOT;
++        }
++    }
+     if (protocol == ETH_P_IP_VALUE) {
+         if (fill_ipv4_key(data, end, offset, control, &flow, &fragment, 0) != SB_TC_PARSE_FLOW) return TC_ACT_SHOT;
+     } else if (protocol == ETH_P_IPV6_VALUE) {
+@@ -232,3 +259,8 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
+     skb->mark = 0U;
+     return redirect(value.ifindex, (value.flags & 0xffU) == SB_TC_PATH_DELIVERY ? BPF_F_INGRESS : 0U);
+ }
++
++SEC("classifier/isolated_return")
++int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) { return isolated_return(skb, true); }
++SEC("classifier/isolated_return_l3")
++int sing_ebpf_tc_isolated_return_l3(struct __sk_buff *skb) { return isolated_return(skb, false); }
+diff --git a/runtime/api.go b/runtime/api.go
+index e21cb55..d51c68a 100644
+--- a/runtime/api.go
++++ b/runtime/api.go
+@@ -155,6 +155,10 @@ func (d *tcDataPlane) TCDiagnostics() core.TCDiagnostics {
+ 		info.RoutingPriority = d.routing.priority
+ 		info.RoutingSlot = d.routing.slot
+ 	}
++	deliveryKind := ""
++	if d.delivery != nil {
++		deliveryKind = d.delivery.deliveryKind
++	}
+ 	mode := ""
+ 	for _, attachment := range d.attachments {
+ 		if attachment.attachmentType == "" {
+@@ -180,6 +184,7 @@ func (d *tcDataPlane) TCDiagnostics() core.TCDiagnostics {
+ 		RetiredAttachmentCount: len(d.retiredAttachments),
+ 		RetiredDeliveryCount:   len(d.retiredDeliveries),
+ 		Priority:               d.priority,
++		DeliveryKind:           deliveryKind,
+ 		RequiresRebuild:        requiresRebuild,
+ 	}
+ }
+diff --git a/runtime/core_access.go b/runtime/core_access.go
+index b469b01..4bbc333 100644
+--- a/runtime/core_access.go
++++ b/runtime/core_access.go
+@@ -18,3 +18,6 @@ func rawSharedPacketRewriteBackend(backend *public.SharedPacketRewriteBackend) *
+ // coreAttachTCXOrdered is a variable so tests can observe the priority each
+ // TCX attach requests without a TCX kernel.
+ var coreAttachTCXOrdered = core.AttachTCXOrdered
++
++// coreAttachTCXPositioned is the positioned variant used by head/tail.
++var coreAttachTCXPositioned = core.AttachTCXPositioned
+diff --git a/runtime/tc_dataplane.go b/runtime/tc_dataplane.go
+index 31d06ac..31bc510 100644
+--- a/runtime/tc_dataplane.go
++++ b/runtime/tc_dataplane.go
+@@ -28,7 +28,6 @@ const (
+ 	tcSharedICMPReplyFilterHandle = 0x5348
+ )
+ 
+-var tcVethSequence atomic.Uint32
+ var tcxSupport atomic.Int32
+ 
+ const (
+@@ -110,9 +109,14 @@ type tcDeliveryLink struct {
+ 	replyMTU     int
+ 	redirectName string
+ 	deliveryName string
++	deliveryKind string
+ 	redirect     netlink.Link
+ 	delivery     netlink.Link
+ 	filter       *netlink.BpfFilter
++	// returnLink / deliverLink hold the TCX attachments when the hook is not
++	// on clsact. Exactly one of link and filter is set per hook.
++	returnLink  tcxAttachedLink
++	deliverLink tcxAttachedLink
+ 	// deliveryMAC is the private end's address programmed into the backend
+ 	// as every redirected frame's destination.
+ 	deliveryMAC commonEBPF.MACAddress
+@@ -124,6 +128,7 @@ type tcDataPlane struct {
+ 	replyMTU              int
+ 	access                sync.Mutex
+ 	backend               *commonEBPF.TCBackend
++	deliveryKind          string
+ 	routing               *tcPolicyRouting
+ 	delivery              *tcDeliveryLink
+ 	attachments           []*tcInterfaceAttachment
+@@ -211,6 +216,9 @@ func startTCDataPlane(
+ 	namespace *TCNamespace,
+ ) (*tcDataPlane, error) {
+ 	dataPlane := &tcDataPlane{backend: backend, sharedSourceMACPolicy: sharedSourceMACPolicy, priority: priority}
++	if backend != nil {
++		dataPlane.deliveryKind = backend.DeliveryKind()
++	}
+ 	dataPlane.namespace = namespace
+ 	dataPlane.enableIPv6 = enableIPv6
+ 	cleanup := func(startErr error) (*tcDataPlane, error) {
+@@ -525,6 +533,36 @@ func (a *tcInterfaceAttachment) attachSlotFilter(
+ 	return attachFilter(link, identity.parent, programFD, identity.name, identity.handle, priority)
+ }
+ 
++// tcxPriorityOf returns the configured TCX order, falling back to the clsact
++// filter priority when the caller left it unset.
++// tcxAttach attaches through TCX, honoring an explicit chain position when
++// tcx_priority is unset.
++func tcxAttach(interfaceIndex int, attachType CiliumEBPF.AttachType, program *CiliumEBPF.Program, backend *commonEBPF.TCBackend, fallback uint16) (link.Link, error) {
++	priority := tcxPriorityOf(backend, fallback)
++	if backend != nil && backend.TCXPriority() == 0 {
++		switch backend.TCXPosition() {
++		case "head", "tail":
++			return coreAttachTCXPositioned(interfaceIndex, attachType, program, priority, backend.TCXPosition())
++		}
++	}
++	return coreAttachTCXOrdered(interfaceIndex, attachType, program, priority)
++}
++
++func tcxPriorityOf(backend *commonEBPF.TCBackend, fallback uint16) uint16 {
++	if backend != nil {
++		if value := backend.TCXPriority(); value != 0 {
++			return value
++		}
++		switch backend.TCXPosition() {
++		case "tail":
++			return ^uint16(0)
++		case "head":
++			return DefaultTCPriority
++		}
++	}
++	return fallback
++}
++
+ func tcxUnsupportedError(err error) bool {
+ 	return err != nil && (errors.Is(err, CiliumEBPF.ErrNotSupported) ||
+ 		errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS) ||
+@@ -557,7 +595,8 @@ func attachTCXInterface(linkDevice netlink.Link, backend *commonEBPF.TCBackend,
+ 			continue
+ 		}
+ 		mainLink, icmpLink, err := attachTCXProgramPair(
+-			linkDevice.Attrs().Index, pair.attachType, pair.program, pair.icmpProgram, icmpEchoReplyEnabled, pair.role, priority,
++			linkDevice.Attrs().Index, pair.attachType, pair.program, pair.icmpProgram, icmpEchoReplyEnabled, pair.role,
++			backend, priority,
+ 		)
+ 		if err != nil {
+ 			return closeLinks(err)
+@@ -575,12 +614,13 @@ func attachTCXProgramPair(
+ 	icmpProgram *CiliumEBPF.Program,
+ 	icmpEnabled bool,
+ 	role string,
++	backend *commonEBPF.TCBackend,
+ 	priority uint16,
+ ) (link.Link, link.Link, error) {
+ 	if program == nil {
+ 		return nil, nil, E.New("TC eBPF ", role, " program is unavailable")
+ 	}
+-	mainLink, err := coreAttachTCXOrdered(interfaceIndex, attachType, program, priority)
++	mainLink, err := tcxAttach(interfaceIndex, attachType, program, backend, priority)
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+@@ -590,7 +630,7 @@ func attachTCXProgramPair(
+ 	if icmpProgram == nil {
+ 		return nil, nil, E.Errors(E.New("icmp_echo_reply ", role, " reply program is unavailable"), mainLink.Close())
+ 	}
+-	icmpLink, err := coreAttachTCXOrdered(interfaceIndex, attachType, icmpProgram, priority)
++	icmpLink, err := tcxAttach(interfaceIndex, attachType, icmpProgram, backend, priority)
+ 	if err != nil {
+ 		return nil, nil, E.Errors(err, mainLink.Close())
+ 	}
+@@ -782,7 +822,7 @@ func updateTCXInterfaceAttachment(
+ 		added := false
+ 		if attached == nil {
+ 			var err error
+-			attached, err = coreAttachTCXOrdered(linkDevice.Attrs().Index, attachType, program, priority)
++			attached, err = tcxAttach(linkDevice.Attrs().Index, attachType, program, backend, priority)
+ 			if err != nil {
+ 				return err
+ 			}
+@@ -815,7 +855,7 @@ func updateTCXInterfaceAttachment(
+ 				}
+ 				return startErr
+ 			}
+-			icmpAttached, err := coreAttachTCXOrdered(linkDevice.Attrs().Index, attachType, icmpProgram, priority)
++			icmpAttached, err := tcxAttach(linkDevice.Attrs().Index, attachType, icmpProgram, backend, priority)
+ 			if err != nil {
+ 				if added {
+ 					return E.Errors(err, closeTCXRoleLink(attachment, local))
+diff --git a/runtime/tc_delivery.go b/runtime/tc_delivery.go
+index b52004a..d66476b 100644
+--- a/runtime/tc_delivery.go
++++ b/runtime/tc_delivery.go
+@@ -4,12 +4,16 @@ package runtime
+ 
+ import (
+ 	"crypto/rand"
+-	"fmt"
++	"encoding/hex"
++	"errors"
+ 	"net"
+ 	"os"
+ 	"strings"
+ 
++	CiliumEBPF "github.com/cilium/ebpf"
++
+ 	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
++	intcore "github.com/CHIZI-0618/sing-ebpf/internal/core"
+ 	"github.com/sagernet/netlink"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ )
+@@ -44,13 +48,38 @@ func tcDeliveryMACAddress(link netlink.Link) (commonEBPF.MACAddress, bool) {
+ }
+ 
+ func nextTCVethNames() (string, string, error) {
++	return nextTCDeliveryNames(DeliveryVeth)
++}
++
++// nextTCDeliveryNames allocates the host and peer names of one delivery pair.
++// Linux caps interface names at 15 characters, so "sing-box-veth-<random>"
++// does not fit; the "sb-" prefix keeps the device kind readable within the
++// limit.
++func nextTCDeliveryNames(kind string) (string, string, error) {
++	prefix := "sb-veth-"
++	suffixLength := 6
++	switch kind {
++	case DeliveryNetkit, DeliveryNetkitL3:
++		prefix = "sb-netkit-"
++		suffixLength = 5
++	case DeliveryAuto:
++		// The device may still fall back to veth, so keep the name neutral
++		// instead of claiming a kind that was not used.
++		prefix = "sb-dlv-"
++	}
+ 	for range 1024 {
+-		sequence := tcVethSequence.Add(1)
+-		suffix := fmt.Sprintf("%04x%04x", uint32(os.Getpid())&0xffff, sequence&0xffff)
+-		redirectName := "sbt" + suffix
+-		deliveryName := "sbd" + suffix
+-		if len(redirectName) > 15 || len(deliveryName) > 15 {
+-			return "", "", E.New("TC eBPF delivery link name exceeds Linux limit")
++		redirectSuffix, err := newTCDeliveryNameSuffix(suffixLength)
++		if err != nil {
++			return "", "", err
++		}
++		deliverySuffix, err := newTCDeliveryNameSuffix(suffixLength)
++		if err != nil {
++			return "", "", err
++		}
++		redirectName := prefix + redirectSuffix
++		deliveryName := prefix + deliverySuffix
++		if redirectName == deliveryName {
++			continue
+ 		}
+ 		_, redirectErr := netlink.LinkByName(redirectName)
+ 		_, deliveryErr := netlink.LinkByName(deliveryName)
+@@ -67,6 +96,14 @@ func nextTCVethNames() (string, string, error) {
+ 	return "", "", E.New("unable to allocate TC eBPF delivery link name")
+ }
+ 
++func newTCDeliveryNameSuffix(length int) (string, error) {
++	raw := make([]byte, (length+1)/2)
++	if _, err := rand.Read(raw); err != nil {
++		return "", err
++	}
++	return hex.EncodeToString(raw)[:length], nil
++}
++
+ // These settings are applied only inside the caller-owned private namespace.
+ // Namespace destruction owns their lifetime; no host-global restore list exists.
+ func tcInterfaceSysctlPath(interfaceName, setting string) string {
+@@ -87,8 +124,70 @@ func setTCSysctl(path, value string) (bool, error) {
+ 	return true, nil
+ }
+ 
++// attachTCDeliveryHook attaches one delivery hook, preferring TCX and falling
++// back to clsact when TCX is unavailable on this kernel or hook.
++func attachTCDeliveryHook(device netlink.Link, program *CiliumEBPF.Program, programFD int, name string,
++	handle, priority uint16, backend *commonEBPF.TCBackend) (tcxAttachedLink, *netlink.BpfFilter, error) {
++	if program != nil {
++		attached, err := tcxAttach(device.Attrs().Index, CiliumEBPF.AttachTCXIngress, program, backend, priority)
++		if err == nil {
++			return attached, nil, nil
++		}
++		if !tcxUnsupportedError(err) && !errors.Is(err, intcore.ErrTCXOrderUnavailable) {
++			return nil, nil, E.Cause(err, "attach TCX ", name)
++		}
++	}
++	if err := ensureTCClsact(device); err != nil {
++		return nil, nil, err
++	}
++	filter, err := attachTCFilter(device, netlink.HANDLE_MIN_INGRESS, programFD, name, handle, priority)
++	if err != nil {
++		return nil, nil, err
++	}
++	return nil, filter, nil
++}
++
++func deliveryHookAttached(attached tcxAttachedLink, filter *netlink.BpfFilter, device netlink.Link,
++	name string, handle, priority uint16) (bool, error) {
++	if attached != nil {
++		return tcxLinkAttached(attached, device.Attrs().Index, CiliumEBPF.AttachTCXIngress)
++	}
++	return tcFilterAttached(device, netlink.HANDLE_MIN_INGRESS, name, handle, priority)
++}
++
++func closeTCDeliveryHook(attached *tcxAttachedLink, filter **netlink.BpfFilter) error {
++	if *attached != nil {
++		err := (*attached).Close()
++		if err == nil {
++			*attached = nil
++		}
++		return err
++	}
++	return detachTCFilterOwned(filter)
++}
++
++func repairTCDeliveryHook(attached *tcxAttachedLink, filter **netlink.BpfFilter, device netlink.Link,
++	program *CiliumEBPF.Program, programFD int, name string, handle, priority uint16,
++	backend *commonEBPF.TCBackend) (bool, error) {
++	live, err := deliveryHookAttached(*attached, *filter, device, name, handle, priority)
++	if err != nil || live {
++		return false, err
++	}
++	if *attached != nil {
++		_ = (*attached).Close()
++		*attached = nil
++	}
++	newLink, newFilter, err := attachTCDeliveryHook(device, program, programFD, name, handle, priority, backend)
++	if err != nil {
++		return false, err
++	}
++	*attached, *filter = newLink, newFilter
++	return true, nil
++}
++
+ func (d *tcDeliveryLink) IsClosed() bool {
+-	return d == nil || d.filter == nil && d.returnFilter == nil && d.redirect == nil && d.delivery == nil
++	return d == nil || d.filter == nil && d.returnFilter == nil &&
++		d.deliverLink == nil && d.returnLink == nil && d.redirect == nil && d.delivery == nil
+ }
+ 
+ func (d *tcDeliveryLink) Close() error {
+diff --git a/runtime/tc_delivery_link_netns_test.go b/runtime/tc_delivery_link_netns_test.go
+index 03778a4..42d23cb 100644
+--- a/runtime/tc_delivery_link_netns_test.go
++++ b/runtime/tc_delivery_link_netns_test.go
+@@ -23,7 +23,7 @@ func deliveryPairLeftBehind(t *testing.T) []string {
+ 	var leftBehind []string
+ 	for _, device := range links {
+ 		name := device.Attrs().Name
+-		if strings.HasPrefix(name, "sbt") || strings.HasPrefix(name, "sbd") {
++		if strings.HasPrefix(name, "sb-veth-") || strings.HasPrefix(name, "sb-netkit-") {
+ 			leftBehind = append(leftBehind, name)
+ 		}
+ 	}
+diff --git a/runtime/tc_delivery_netkit_test.go b/runtime/tc_delivery_netkit_test.go
+new file mode 100644
+index 0000000..8543573
+--- /dev/null
++++ b/runtime/tc_delivery_netkit_test.go
+@@ -0,0 +1,44 @@
++//go:build with_ebpf && linux && ebpf_integration
++
++package runtime
++
++import (
++	"errors"
++	"os"
++	"testing"
++
++	"golang.org/x/sys/unix"
++)
++
++// TestProbeDeliveryNetkit needs root and a kernel with netkit support (6.7+).
++// It creates and immediately removes a pair in the current namespace.
++func TestProbeDeliveryNetkit(t *testing.T) {
++	if os.Geteuid() != 0 {
++		t.Skip("requires root")
++	}
++	actual, err := ProbeDelivery(DeliveryNetkit)
++	if err != nil {
++		if tcxUnsupportedError(err) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS) {
++			t.Skipf("netkit unavailable on this kernel: %v", err)
++		}
++		t.Fatalf("probe netkit: %v", err)
++	}
++	if actual != DeliveryNetkit {
++		t.Fatalf("created %q, want %q", actual, DeliveryNetkit)
++	}
++}
++
++// TestProbeDeliveryVeth is the baseline: it must work on every supported
++// kernel, so a failure here is a real regression.
++func TestProbeDeliveryVeth(t *testing.T) {
++	if os.Geteuid() != 0 {
++		t.Skip("requires root")
++	}
++	actual, err := ProbeDelivery(DeliveryVeth)
++	if err != nil {
++		t.Fatalf("probe veth: %v", err)
++	}
++	if actual != DeliveryVeth {
++		t.Fatalf("created %q, want %q", actual, DeliveryVeth)
++	}
++}
+diff --git a/runtime/tc_isolated_delivery.go b/runtime/tc_isolated_delivery.go
+index 335242f..8195476 100644
+--- a/runtime/tc_isolated_delivery.go
++++ b/runtime/tc_isolated_delivery.go
+@@ -51,7 +51,7 @@ func (d *tcDataPlane) inNamespace(block func() error) error {
+ }
+ 
+ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+-	hostName, peerName, err := nextTCVethNames()
++	hostName, peerName, err := nextTCDeliveryNames(d.deliveryKind)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -69,18 +69,13 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+ 		n.access.RUnlock()
+ 		return nil, os.ErrClosed
+ 	}
+-	veth := &netlink.Veth{
+-		LinkAttrs:        netlink.LinkAttrs{Name: hostName, MTU: 65535, HardwareAddr: hostAddress},
+-		PeerName:         peerName,
+-		PeerHardwareAddr: peerAddress,
+-		PeerNamespace:    netlink.NsFd(n.handle),
+-	}
+-	err = netlink.LinkAdd(veth)
++	created, actualKind, err := createTCDeliveryPair(d.deliveryKind, hostName, peerName, hostAddress, peerAddress, int(n.handle), deliveryMTU(d.replyMTU))
+ 	n.access.RUnlock()
+ 	if err != nil {
+-		return nil, E.Cause(err, "create isolated TC veth (CONFIG_VETH and CAP_NET_ADMIN required)")
++		return nil, err
+ 	}
+-	owner := &tcDeliveryLink{namespace: n, redirectName: hostName, deliveryName: peerName, redirect: veth, enableIPv6: d.enableIPv6, replyMTU: d.replyMTU}
++	owner := &tcDeliveryLink{namespace: n, redirectName: hostName, deliveryName: peerName, redirect: created,
++		deliveryKind: actualKind, enableIPv6: d.enableIPv6, replyMTU: d.replyMTU}
+ 	cleanup := func(cause error) (*tcDeliveryLink, error) {
+ 		err := E.Errors(cause, owner.Close())
+ 		if owner.IsClosed() {
+@@ -90,17 +85,15 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+ 	}
+ 	owner.redirect, err = d.linkByName()(hostName)
+ 	if err != nil {
+-		owner.redirect = veth
++		owner.redirect = created
+ 		return cleanup(E.Cause(err, "find TC eBPF redirect link"))
+ 	}
+ 	if err = netlink.LinkSetUp(owner.redirect); err != nil {
+ 		return cleanup(err)
+ 	}
+-	if err = ensureTCClsact(owner.redirect); err != nil {
+-		return cleanup(err)
+-	}
+-	owner.returnFilter, err = attachTCFilter(owner.redirect, netlink.HANDLE_MIN_INGRESS,
+-		rawTCBackend(d.backend).IsolatedReturnProgramFD(), "sb_tc_return", tcReturnFilterHandle, d.priority)
++	owner.returnLink, owner.returnFilter, err = attachTCDeliveryHook(owner.redirect,
++		rawTCBackend(d.backend).IsolatedReturnProgram(), rawTCBackend(d.backend).IsolatedReturnProgramFD(),
++		"sb_tc_return", tcReturnFilterHandle, d.priority, d.backend)
+ 	if err != nil {
+ 		return cleanup(err)
+ 	}
+@@ -113,18 +106,16 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+ 		if _, err = owner.configureIsolatedPeer(true); err != nil {
+ 			return err
+ 		}
+-		if err = ensureTCClsact(owner.delivery); err != nil {
+-			return err
+-		}
+-		owner.filter, err = attachTCFilter(owner.delivery, netlink.HANDLE_MIN_INGRESS,
+-			rawTCBackend(d.backend).DeliveryIngressProgramFD(), "sb_tc_deliver", tcDeliveryFilterHandle, d.priority)
++		owner.deliverLink, owner.filter, err = attachTCDeliveryHook(owner.delivery,
++			rawTCBackend(d.backend).DeliveryIngressProgram(), rawTCBackend(d.backend).DeliveryIngressProgramFD(),
++			"sb_tc_deliver", tcDeliveryFilterHandle, d.priority, d.backend)
+ 		return err
+ 	})
+ 	if err != nil {
+ 		return cleanup(E.Cause(err, "configure TC namespace"))
+ 	}
+ 	mac, valid := tcDeliveryMACAddress(owner.delivery)
+-	if !valid {
++	if !valid && owner.deliveryKind != DeliveryNetkitL3 {
+ 		return cleanup(E.New("invalid TC namespace peer MAC"))
+ 	}
+ 	if err = d.backend.SetDeliveryInterface(uint32(owner.redirect.Attrs().Index), mac); err != nil {
+@@ -291,10 +282,12 @@ func (d *tcDeliveryLink) healthyIsolated(priority uint16) (bool, error) {
+ 	if d.redirect.Attrs().Flags&net.FlagUp == 0 {
+ 		return false, nil
+ 	}
+-	if mac, valid := tcDeliveryMACAddress(d.delivery); !valid || mac != d.deliveryMAC {
+-		return false, nil
++	if d.deliveryKind != DeliveryNetkitL3 {
++		if mac, valid := tcDeliveryMACAddress(d.delivery); !valid || mac != d.deliveryMAC {
++			return false, nil
++		}
+ 	}
+-	live, err = tcFilterAttached(d.redirect, netlink.HANDLE_MIN_INGRESS, "sb_tc_return", tcReturnFilterHandle, priority)
++	live, err = deliveryHookAttached(d.returnLink, d.returnFilter, d.redirect, "sb_tc_return", tcReturnFilterHandle, priority)
+ 	if err != nil || !live {
+ 		return false, err
+ 	}
+@@ -304,7 +297,7 @@ func (d *tcDeliveryLink) healthyIsolated(priority uint16) (bool, error) {
+ 		if err != nil || !live {
+ 			return err
+ 		}
+-		live, err = tcFilterAttached(d.delivery, netlink.HANDLE_MIN_INGRESS, "sb_tc_deliver", tcDeliveryFilterHandle, priority)
++		live, err = deliveryHookAttached(d.deliverLink, d.filter, d.delivery, "sb_tc_deliver", tcDeliveryFilterHandle, priority)
+ 		return err
+ 	})
+ 	return live, err
+@@ -319,10 +312,10 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+ 	// Anything that changes the private end's address after creation leaves
+ 	// the backend addressing frames to a MAC the interface no longer accepts.
+ 	mac, valid := tcDeliveryMACAddress(d.delivery)
+-	if !valid {
++	if !valid && d.deliveryKind != DeliveryNetkitL3 {
+ 		return false, true, nil
+ 	}
+-	if mac != d.deliveryMAC {
++	if valid && mac != d.deliveryMAC {
+ 		if err = backend.SetDeliveryInterface(uint32(d.redirect.Attrs().Index), mac); err != nil {
+ 			return false, false, E.Cause(err, "update TC eBPF delivery address")
+ 		}
+@@ -335,22 +328,12 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+ 		}
+ 		changed = true
+ 	}
+-	repairFilter := func(link netlink.Link, name string, handle uint16, fd int, target **netlink.BpfFilter) error {
+-		attached, err := tcFilterAttached(link, netlink.HANDLE_MIN_INGRESS, name, handle, priority)
+-		if err != nil || attached {
+-			return err
+-		}
+-		if err = ensureTCClsact(link); err != nil {
+-			return err
+-		}
+-		*target, err = attachTCFilter(link, netlink.HANDLE_MIN_INGRESS, fd, name, handle, priority)
+-		if err == nil {
+-			changed = true
+-		}
+-		return err
+-	}
+-	if err = repairFilter(d.redirect, "sb_tc_return", tcReturnFilterHandle, rawTCBackend(backend).IsolatedReturnProgramFD(), &d.returnFilter); err != nil {
+-		return changed, false, err
++	if repaired, repairErr := repairTCDeliveryHook(&d.returnLink, &d.returnFilter, d.redirect,
++		rawTCBackend(backend).IsolatedReturnProgram(), rawTCBackend(backend).IsolatedReturnProgramFD(),
++		"sb_tc_return", tcReturnFilterHandle, priority, backend); repairErr != nil {
++		return changed, false, repairErr
++	} else if repaired {
++		changed = true
+ 	}
+ 	err = d.namespace.with(func() error {
+ 		healthy, err := d.configureIsolatedPeer(true)
+@@ -358,17 +341,23 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+ 		if err != nil {
+ 			return err
+ 		}
+-		return repairFilter(d.delivery, "sb_tc_deliver", tcDeliveryFilterHandle, rawTCBackend(backend).DeliveryIngressProgramFD(), &d.filter)
++		repaired, repairErr := repairTCDeliveryHook(&d.deliverLink, &d.filter, d.delivery,
++			rawTCBackend(backend).DeliveryIngressProgram(), rawTCBackend(backend).DeliveryIngressProgramFD(),
++			"sb_tc_deliver", tcDeliveryFilterHandle, priority, backend)
++		if repaired {
++			changed = true
++		}
++		return repairErr
+ 	})
+ 	return changed, false, err
+ }
+ 
+ func (d *tcDeliveryLink) closeIsolated() error {
+-	if err := detachTCFilterOwned(&d.returnFilter); err != nil {
++	if err := closeTCDeliveryHook(&d.returnLink, &d.returnFilter); err != nil {
+ 		return err
+ 	}
+-	if d.filter != nil {
+-		if err := d.namespace.with(func() error { return detachTCFilterOwned(&d.filter) }); err != nil {
++	if d.filter != nil || d.deliverLink != nil {
++		if err := d.namespace.with(func() error { return closeTCDeliveryHook(&d.deliverLink, &d.filter) }); err != nil {
+ 			return err
+ 		}
+ 	}
+diff --git a/runtime/tc_netkit.go b/runtime/tc_netkit.go
+new file mode 100644
+index 0000000..4c8ee89
+--- /dev/null
++++ b/runtime/tc_netkit.go
+@@ -0,0 +1,151 @@
++//go:build with_ebpf && (linux || android)
++
++package runtime
++
++import (
++	"net"
++
++	"github.com/sagernet/netlink"
++	"github.com/sagernet/netlink/nl"
++	E "github.com/sagernet/sing/common/exceptions"
++	"golang.org/x/sys/unix"
++)
++
++// Delivery link kinds accepted by commonEBPF.TCConfig.Delivery.
++const (
++	DeliveryVeth   = "veth"
++	DeliveryNetkit = "netkit"
++	// DeliveryNetkitL3 is netkit without L2 framing.
++	DeliveryNetkitL3 = "netkit-l3"
++	// DeliveryAuto prefers netkit and falls back to veth when netkit cannot be
++	// created on this kernel.
++	DeliveryAuto = "auto"
++
++	// netkitModeL2 keeps Ethernet framing; netkitModeL3 drops it and relies on
++	// the control block's delivery_mode so delivery/return skip L2 handling.
++	netkitModeL2 = 0
++	netkitModeL3 = 1
++
++	// tcDeliveryMTUMin is the default delivery link MTU; larger interface MTUs
++	// raise it. A 65535 device only confuses tools like LuCI.
++	tcDeliveryMTUMin = 1500
++)
++
++// createTCDeliveryPair creates the host/peer pair used to cross into the
++// private listener namespace. The returned link is the host end; the caller
++// re-resolves it by name afterwards.
++// deliveryMTU keeps the pair at a normal Ethernet MTU unless the selected
++// interfaces use larger frames.
++func deliveryMTU(replyMTU int) int {
++	if replyMTU < tcDeliveryMTUMin {
++		return tcDeliveryMTUMin
++	}
++	return replyMTU
++}
++
++func createTCDeliveryPair(kind, hostName, peerName string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu int) (netlink.Link, string, error) {
++	switch kind {
++	case "", DeliveryVeth:
++		link, err := addVethPair(hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu)
++		return link, DeliveryVeth, err
++	case DeliveryNetkit:
++		link, err := addNetkitDelivery(hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu, netkitModeL2)
++		return link, DeliveryNetkit, err
++	case DeliveryNetkitL3:
++		link, err := addNetkitDelivery(hostName, peerName, nil, nil, namespaceFD, mtu, netkitModeL3)
++		return link, DeliveryNetkitL3, err
++	case DeliveryAuto:
++		// Prefer netkit; fall back to veth when the kernel rejects it.
++		if link, err := addNetkitDelivery(hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu, netkitModeL2); err == nil {
++			return link, DeliveryNetkit, nil
++		}
++		link, err := addVethPair(hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu)
++		return link, DeliveryVeth, err
++	default:
++		return nil, "", E.New("unknown TC eBPF delivery kind: ", kind)
++	}
++}
++
++func addVethPair(hostName, peerName string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu int) (netlink.Link, error) {
++	veth := &netlink.Veth{
++		LinkAttrs:        netlink.LinkAttrs{Name: hostName, MTU: mtu, HardwareAddr: hostAddress},
++		PeerName:         peerName,
++		PeerHardwareAddr: peerAddress,
++	}
++	if namespaceFD >= 0 {
++		veth.PeerNamespace = netlink.NsFd(namespaceFD)
++	}
++	if err := netlink.LinkAdd(veth); err != nil {
++		return nil, E.Cause(err, "create isolated TC veth (CONFIG_VETH and CAP_NET_ADMIN required)")
++	}
++	return veth, nil
++}
++
++func addNetkitDelivery(hostName, peerName string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu, mode int) (netlink.Link, error) {
++	if err := addNetkitPair(hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu, mode); err != nil {
++		return nil, E.Cause(err, "create isolated TC netkit pair (kernel 6.7+, CONFIG_NETKIT and CAP_NET_ADMIN required)")
++	}
++	link, err := netlink.LinkByName(hostName)
++	if err != nil {
++		return nil, E.Cause(err, "find TC eBPF netkit link")
++	}
++	return link, nil
++}
++
++// ProbeDelivery creates and immediately removes a delivery pair of the given
++// kind in the current network namespace and reports the kind that was actually
++// created. It is the explicit, opt-in mutation used by `tools ebpf status`.
++func ProbeDelivery(kind string) (string, error) {
++	hostName, peerName, err := nextTCDeliveryNames(kind)
++	if err != nil {
++		return "", err
++	}
++	link, actual, err := createTCDeliveryPair(kind, hostName, peerName, nil, nil, -1, deliveryMTU(0))
++	if err == nil && link != nil {
++		_ = netlink.LinkDel(link)
++	}
++	// Deleting one end removes the pair; make sure nothing is left behind.
++	if remaining, lookupErr := netlink.LinkByName(hostName); lookupErr == nil {
++		_ = netlink.LinkDel(remaining)
++	}
++	if err != nil {
++		return "", err
++	}
++	return actual, nil
++}
++
++// addNetkitPair issues RTM_NEWLINK by hand: sagernet/netlink's LinkAdd has a
++// closed set of link types and netkit's nested attributes are not in it.
++func addNetkitPair(hostName, peerName string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu, mode int) error {
++	request := nl.NewNetlinkRequest(unix.RTM_NEWLINK,
++		unix.NLM_F_REQUEST|unix.NLM_F_ACK|unix.NLM_F_CREATE|unix.NLM_F_EXCL)
++	request.AddData(nl.NewIfInfomsg(unix.AF_UNSPEC))
++	request.AddData(nl.NewRtAttr(unix.IFLA_IFNAME, nl.ZeroTerminated(hostName)))
++	request.AddData(nl.NewRtAttr(unix.IFLA_MTU, nl.Uint32Attr(uint32(mtu))))
++	if len(hostAddress) > 0 {
++		request.AddData(nl.NewRtAttr(unix.IFLA_ADDRESS, hostAddress))
++	}
++
++	linkInfo := nl.NewRtAttr(unix.IFLA_LINKINFO, nil)
++	linkInfo.AddRtAttr(nl.IFLA_INFO_KIND, nl.NonZeroTerminated("netkit"))
++	data := linkInfo.AddRtAttr(nl.IFLA_INFO_DATA, nil)
++	data.AddRtAttr(unix.IFLA_NETKIT_MODE, nl.Uint32Attr(uint32(mode)))
++
++	peer := data.AddRtAttr(unix.IFLA_NETKIT_PEER_INFO, nil)
++	nl.NewIfInfomsgChild(peer, unix.AF_UNSPEC)
++	peer.AddRtAttr(unix.IFLA_IFNAME, nl.ZeroTerminated(peerName))
++	peer.AddRtAttr(unix.IFLA_MTU, nl.Uint32Attr(uint32(mtu)))
++	if len(peerAddress) > 0 {
++		peer.AddRtAttr(unix.IFLA_ADDRESS, peerAddress)
++	}
++	if namespaceFD >= 0 {
++		peer.AddRtAttr(unix.IFLA_NET_NS_FD, nl.Uint32Attr(uint32(namespaceFD)))
++	}
++
++	request.AddData(linkInfo)
++
++	if _, err := request.Execute(unix.NETLINK_ROUTE, 0); err != nil {
++		return err
++	}
++	return nil
++}
