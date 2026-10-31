@@ -1,20 +1,42 @@
 diff --git a/option/ebpf.go b/option/ebpf.go
-index fb2474a..586d16d 100644
+index fb2474a..428c1b2 100644
 --- a/option/ebpf.go
 +++ b/option/ebpf.go
-@@ -9,6 +9,10 @@ import (
- 
- type EBPFInboundOptions struct {
- 	Network    NetworkList      `json:"network,omitempty"`
-+	// Delivery selects the socket-assignment delivery link:
-+	// "" or "veth" (default) uses a veth pair, "netkit" uses a netkit pair in
-+	// L2 mode (Linux 6.7+). Only valid when a socket_assign path is enabled.
-+	Delivery   string           `json:"delivery,omitempty" enum:"veth,netkit"`
- 	UDPTimeout UDPTimeoutCompat `json:"udp_timeout,omitempty"`
- 	// UDPFragment controls whether transparent UDP sockets may fragment
+@@ -14,6 +14,9 @@ type EBPFInboundOptions struct {
  	// oversized datagrams. An omitted value keeps fragmentation disabled.
+ 	UDPFragment *bool             `json:"udp_fragment,omitempty"`
+ 	TCPriority  EBPFTCPriority    `json:"tc_priority,omitempty"`
++	// TCXPriority orders the TCX programs on the hook; lower runs first.
++	// Defaults to 1 (top). tc_priority only applies to clsact filters.
++	TCXPriority EBPFTCPriority    `json:"tcx_priority,omitempty"`
+ 	Local       EBPFLocalOptions  `json:"local,omitempty"`
+ 	Shared      EBPFSharedOptions `json:"shared,omitempty"`
+ 	// FakeIPICMP, when "reply", answers ICMP Echo Request packets addressed to
+@@ -30,6 +33,11 @@ type EBPFLocalOptions struct {
+ 	Enabled              *bool                            `json:"enabled,omitempty"`
+ 	DNSMode              string                           `json:"dns_mode,omitempty" enum:"hijack,respect_policy,off"`
+ 	DataPlane            string                           `json:"data_plane,omitempty" enum:"cgroup,socket_assign"`
++	// Delivery selects the socket-assignment delivery link: "" or "veth"
++	// (default) uses a veth pair, "netkit" uses a netkit pair in L2 mode
++	// (Linux 6.7+). Only valid when local.data_plane is socket_assign.
++	// local and shared share one delivery link, so both must agree.
++	Delivery             string                           `json:"delivery,omitempty" enum:"veth,netkit"`
+ 	CgroupPath           string                           `json:"cgroup_path,omitempty"`
+ 	IPv6                 *bool                            `json:"ipv6,omitempty"`
+ 	BypassPrivateAddress *bool                            `json:"bypass_private_address,omitempty"`
+@@ -50,6 +58,10 @@ type EBPFSharedOptions struct {
+ 	Enabled              *bool                            `json:"enabled,omitempty"`
+ 	DefaultInterface     bool                             `json:"default_interface,omitempty"`
+ 	DataPlane            string                           `json:"data_plane,omitempty" enum:"socket_assign,packet_rewrite"`
++	// Delivery selects the socket-assignment delivery link: "" or "veth"
++	// (default) uses a veth pair, "netkit" uses a netkit pair in L2 mode
++	// (Linux 6.7+). Only valid when shared.data_plane is socket_assign.
++	Delivery             string                           `json:"delivery,omitempty" enum:"veth,netkit"`
+ 	DNSMode              string                           `json:"dns_mode,omitempty" enum:"hijack,respect_policy,off"`
+ 	Interface            badoption.Listable[string]       `json:"interface,omitempty"`
+ 	IPv6                 *bool                            `json:"ipv6,omitempty"`
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
-index 8c3848f..6094372 100644
+index 8c3848f..c193922 100644
 --- a/protocol/ebpf/inbound.go
 +++ b/protocol/ebpf/inbound.go
 @@ -29,6 +29,10 @@ const (
@@ -36,23 +58,49 @@ index 8c3848f..6094372 100644
  	cgroupPath                string
  	cgroupBackend             *commonEBPF.CgroupBackend
  	localRoutes               *commonEBPF.LocalRouteSet
-@@ -206,6 +211,15 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -104,6 +109,7 @@ type Inbound struct {
+ 	localBypassExclude        []netip.Prefix
+ 	sharedBypassExclude       []netip.Prefix
+ 	tcPriority                uint16
++	tcxPriority               uint16
+ 	networkGeneration         uint64
+ 	fakeIPIPv4Prefix          netip.Prefix
+ 	fakeIPIPv6Prefix          netip.Prefix
+@@ -206,6 +212,33 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  		return nil, err
  	}
  	localDataPlane, cgroupPath, sharedDataPlane := selection.localDataPlane, selection.cgroupPath, selection.sharedDataPlane
-+	delivery, err := normalizeDelivery(options.Delivery)
++	localDelivery, err := normalizeDelivery(options.Local.Delivery)
 +	if err != nil {
 +		return nil, err
 +	}
-+	if delivery == deliveryNetkit &&
-+		localDataPlane != localDataPlaneSocketAssign &&
-+		sharedDataPlane != sharedDataPlaneSocketAssign {
-+		return nil, E.New("delivery=netkit requires a socket_assign data plane")
++	if localDelivery == deliveryNetkit &&
++		(!localEnabled || localDataPlane != localDataPlaneSocketAssign) {
++		return nil, E.New("local.delivery=netkit requires local.enabled and local.data_plane=socket_assign")
++	}
++	sharedDelivery, err := normalizeDelivery(options.Shared.Delivery)
++	if err != nil {
++		return nil, err
++	}
++	if sharedDelivery == deliveryNetkit &&
++		(!sharedEnabled || sharedDataPlane != sharedDataPlaneSocketAssign) {
++		return nil, E.New("shared.delivery=netkit requires shared.enabled and shared.data_plane=socket_assign")
++	}
++	if options.Local.Delivery != "" && options.Shared.Delivery != "" &&
++		localDelivery != sharedDelivery {
++		return nil, E.New("local.delivery (", localDelivery, ") and shared.delivery (",
++			sharedDelivery, ") differ, but both scopes share one delivery link")
++	}
++	delivery := deliveryVeth
++	if options.Local.Delivery != "" {
++		delivery = localDelivery
++	} else if options.Shared.Delivery != "" {
++		delivery = sharedDelivery
 +	}
  	fakeIPICMPReply, err := normalizeFakeIPICMP(options.FakeIPICMP)
  	if err != nil {
  		return nil, E.Cause(err, "parse fakeip_icmp")
-@@ -294,6 +308,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -294,6 +327,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  		}(),
  		localEnabled:        localEnabled,
  		localDataPlane:      localDataPlane,
@@ -60,7 +108,25 @@ index 8c3848f..6094372 100644
  		cgroupPath:          cgroupPath,
  		selfBypass:          selfBypass,
  		processInfoCache:    newProcessInfoCache(),
-@@ -404,3 +419,14 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
+@@ -312,6 +346,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+ 		localBypassExclude:  localBypassExclude,
+ 		sharedBypassExclude: sharedBypassExclude,
+ 		tcPriority:          uint16(options.TCPriority),
++		tcxPriority:         uint16(options.TCXPriority),
+ 		sharedIncludeMAC:    sharedIncludeMAC,
+ 		sharedExcludeMAC:    sharedExcludeMAC,
+ 		localPolicy: localUIDPolicy{
+@@ -328,6 +363,9 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+ 	if inbound.tcPriority == 0 {
+ 		inbound.tcPriority = defaultTCPriority
+ 	}
++	if inbound.tcxPriority == 0 {
++		inbound.tcxPriority = defaultTCPriority
++	}
+ 	inbound.tcAssignmentSweepFailure.Store("")
+ 	if dnsTransportManager := service.FromContext[adapter.DNSTransportManager](ctx); dnsTransportManager != nil {
+ 		if fakeIPTransport := dnsTransportManager.FakeIP(); fakeIPTransport != nil {
+@@ -404,3 +442,14 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
  		break
  	}
  }
@@ -76,14 +142,15 @@ index 8c3848f..6094372 100644
 +	}
 +}
 diff --git a/protocol/ebpf/inbound_lifecycle.go b/protocol/ebpf/inbound_lifecycle.go
-index d7fadb9..af2c6e0 100644
+index d7fadb9..8eeff4b 100644
 --- a/protocol/ebpf/inbound_lifecycle.go
 +++ b/protocol/ebpf/inbound_lifecycle.go
-@@ -116,6 +116,7 @@ func (i *Inbound) startInbound() error {
+@@ -116,6 +116,8 @@ func (i *Inbound) startInbound() error {
  		EnableSharedIPv6: sharedSocketAssignEnabled && i.sharedIPv6,
  		EnableTCP:        i.enableTCP,
  		EnableUDP:        i.enableUDP,
 +		Delivery:         i.delivery,
++		TCXPriority:      i.tcxPriority,
  		Policy:           i.compiledPolicy,
  		SelfBypass:       i.selfBypass,
  		TrackProcess:     i.processTracker != nil,

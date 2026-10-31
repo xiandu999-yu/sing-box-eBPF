@@ -1,30 +1,33 @@
 diff --git a/api.go b/api.go
-index cdf7c4b..70302f8 100644
+index cdf7c4b..29de224 100644
 --- a/api.go
 +++ b/api.go
-@@ -250,6 +250,9 @@ type TCConfig struct {
+@@ -250,6 +250,11 @@ type TCConfig struct {
  	EnableTCP          bool
  	EnableUDP          bool
  	DeliveryInterface  uint32
 +	// Delivery selects the socket-assignment delivery link: "" or "veth"
 +	// (default) keeps the veth pair, "netkit" uses a netkit pair in L2 mode.
 +	Delivery           string
++	// TCXPriority orders TCX programs on the hook; lower runs first.
++	TCXPriority        uint16
  	Policy             CompiledPolicy
  	RoutingMark        uint32
  	SelfBypass         *SelfBypass
-@@ -273,6 +276,7 @@ func PrepareTC(config TCConfig) (*TCBackend, error) {
+@@ -273,6 +278,8 @@ func PrepareTC(config TCConfig) (*TCBackend, error) {
  		EnableTCP:          config.EnableTCP,
  		EnableUDP:          config.EnableUDP,
  		DeliveryInterface:  config.DeliveryInterface,
 +		Delivery:           config.Delivery,
++		TCXPriority:        config.TCXPriority,
  		Policy:             config.Policy,
  		RoutingMark:        config.RoutingMark,
  		TrackProcess:       config.TrackProcess,
 diff --git a/internal/core/access.go b/internal/core/access.go
-index 711519b..6c71969 100644
+index 711519b..795969b 100644
 --- a/internal/core/access.go
 +++ b/internal/core/access.go
-@@ -73,6 +73,14 @@ func NewTCBackendHandle(backend *TCBackend) TCBackendHandle {
+@@ -73,6 +73,22 @@ func NewTCBackendHandle(backend *TCBackend) TCBackendHandle {
  	return TCBackendHandle{backend: backend}
  }
  
@@ -36,42 +39,62 @@ index 711519b..6c71969 100644
 +	return h.backend.delivery
 +}
 +
++// TCXPriority reports the configured TCX ordering priority.
++func (h TCBackendHandle) TCXPriority() uint16 {
++	if h.backend == nil {
++		return 0
++	}
++	return h.backend.tcxPriority
++}
++
  func (h TCBackendHandle) tcBackend() *TCBackend {
  	return h.backend
  }
 diff --git a/internal/core/tc.go b/internal/core/tc.go
-index 3ec9cae..29ea50b 100644
+index 3ec9cae..0bc4ab3 100644
 --- a/internal/core/tc.go
 +++ b/internal/core/tc.go
-@@ -101,6 +101,7 @@ type TCConfig struct {
+@@ -101,6 +101,9 @@ type TCConfig struct {
  	EnableTCP          bool
  	EnableUDP          bool
  	DeliveryInterface  uint32
 +	Delivery           string
++	// TCXPriority orders TCX programs on the hook; lower runs first.
++	TCXPriority        uint16
  	Policy             CompiledPolicy
  	RoutingMark        uint32
  	SelfBypassMap      *CiliumEBPF.Map
-@@ -204,6 +205,7 @@ type TCBackend struct {
+@@ -204,6 +207,8 @@ type TCBackend struct {
  	runtime                   *tcRuntime
  	tcpListenerMap            bool
  	programsExposed           bool
 +	delivery                  string
++	tcxPriority               uint16
  	control                   tcControl
  	controlMapFD              int
  	assignmentMapFD           int
-@@ -350,6 +352,7 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
+@@ -350,6 +355,8 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
  		controlMapFD:       maps["tc_control"].FD(),
  		assignmentMapFD:    maps["tc_assignment"].FD(),
  		assignmentCapacity: config.AssignmentCapacity,
 +		delivery:           config.Delivery,
++		tcxPriority:        config.TCXPriority,
  		selfMapExternal:    config.EnableLocal && config.SelfBypassMap != nil,
  	}
  	// From here, backend owns maps and loadedPrograms: giving up on either of the
 diff --git a/runtime/tc_dataplane.go b/runtime/tc_dataplane.go
-index 31d06ac..6ca9c5d 100644
+index 31d06ac..fe4c24d 100644
 --- a/runtime/tc_dataplane.go
 +++ b/runtime/tc_dataplane.go
-@@ -124,6 +124,7 @@ type tcDataPlane struct {
+@@ -28,7 +28,6 @@ const (
+ 	tcSharedICMPReplyFilterHandle = 0x5348
+ )
+ 
+-var tcVethSequence atomic.Uint32
+ var tcxSupport atomic.Int32
+ 
+ const (
+@@ -124,6 +123,7 @@ type tcDataPlane struct {
  	replyMTU              int
  	access                sync.Mutex
  	backend               *commonEBPF.TCBackend
@@ -79,7 +102,7 @@ index 31d06ac..6ca9c5d 100644
  	routing               *tcPolicyRouting
  	delivery              *tcDeliveryLink
  	attachments           []*tcInterfaceAttachment
-@@ -211,6 +212,9 @@ func startTCDataPlane(
+@@ -211,6 +211,9 @@ func startTCDataPlane(
  	namespace *TCNamespace,
  ) (*tcDataPlane, error) {
  	dataPlane := &tcDataPlane{backend: backend, sharedSourceMACPolicy: sharedSourceMACPolicy, priority: priority}
@@ -89,10 +112,146 @@ index 31d06ac..6ca9c5d 100644
  	dataPlane.namespace = namespace
  	dataPlane.enableIPv6 = enableIPv6
  	cleanup := func(startErr error) (*tcDataPlane, error) {
+@@ -525,6 +528,17 @@ func (a *tcInterfaceAttachment) attachSlotFilter(
+ 	return attachFilter(link, identity.parent, programFD, identity.name, identity.handle, priority)
+ }
+ 
++// tcxPriorityOf returns the configured TCX order, falling back to the clsact
++// filter priority when the caller left it unset.
++func tcxPriorityOf(backend *commonEBPF.TCBackend, fallback uint16) uint16 {
++	if backend != nil {
++		if value := backend.TCXPriority(); value != 0 {
++			return value
++		}
++	}
++	return fallback
++}
++
+ func tcxUnsupportedError(err error) bool {
+ 	return err != nil && (errors.Is(err, CiliumEBPF.ErrNotSupported) ||
+ 		errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS) ||
+@@ -557,7 +571,8 @@ func attachTCXInterface(linkDevice netlink.Link, backend *commonEBPF.TCBackend,
+ 			continue
+ 		}
+ 		mainLink, icmpLink, err := attachTCXProgramPair(
+-			linkDevice.Attrs().Index, pair.attachType, pair.program, pair.icmpProgram, icmpEchoReplyEnabled, pair.role, priority,
++			linkDevice.Attrs().Index, pair.attachType, pair.program, pair.icmpProgram, icmpEchoReplyEnabled, pair.role,
++			tcxPriorityOf(backend, priority),
+ 		)
+ 		if err != nil {
+ 			return closeLinks(err)
+@@ -782,7 +797,7 @@ func updateTCXInterfaceAttachment(
+ 		added := false
+ 		if attached == nil {
+ 			var err error
+-			attached, err = coreAttachTCXOrdered(linkDevice.Attrs().Index, attachType, program, priority)
++			attached, err = coreAttachTCXOrdered(linkDevice.Attrs().Index, attachType, program, tcxPriorityOf(backend, priority))
+ 			if err != nil {
+ 				return err
+ 			}
+@@ -815,7 +830,7 @@ func updateTCXInterfaceAttachment(
+ 				}
+ 				return startErr
+ 			}
+-			icmpAttached, err := coreAttachTCXOrdered(linkDevice.Attrs().Index, attachType, icmpProgram, priority)
++			icmpAttached, err := coreAttachTCXOrdered(linkDevice.Attrs().Index, attachType, icmpProgram, tcxPriorityOf(backend, priority))
+ 			if err != nil {
+ 				if added {
+ 					return E.Errors(err, closeTCXRoleLink(attachment, local))
+diff --git a/runtime/tc_delivery.go b/runtime/tc_delivery.go
+index b52004a..36d5a45 100644
+--- a/runtime/tc_delivery.go
++++ b/runtime/tc_delivery.go
+@@ -4,7 +4,7 @@ package runtime
+ 
+ import (
+ 	"crypto/rand"
+-	"fmt"
++	"encoding/hex"
+ 	"net"
+ 	"os"
+ 	"strings"
+@@ -44,13 +44,33 @@ func tcDeliveryMACAddress(link netlink.Link) (commonEBPF.MACAddress, bool) {
+ }
+ 
+ func nextTCVethNames() (string, string, error) {
++	return nextTCDeliveryNames(DeliveryVeth)
++}
++
++// nextTCDeliveryNames allocates the host and peer names of one delivery pair.
++// Linux caps interface names at 15 characters, so "sing-box-veth-<random>"
++// does not fit; the "sb-" prefix keeps the device kind readable within the
++// limit.
++func nextTCDeliveryNames(kind string) (string, string, error) {
++	prefix := "sb-veth-"
++	suffixLength := 6
++	if kind == DeliveryNetkit {
++		prefix = "sb-netkit-"
++		suffixLength = 5
++	}
+ 	for range 1024 {
+-		sequence := tcVethSequence.Add(1)
+-		suffix := fmt.Sprintf("%04x%04x", uint32(os.Getpid())&0xffff, sequence&0xffff)
+-		redirectName := "sbt" + suffix
+-		deliveryName := "sbd" + suffix
+-		if len(redirectName) > 15 || len(deliveryName) > 15 {
+-			return "", "", E.New("TC eBPF delivery link name exceeds Linux limit")
++		redirectSuffix, err := newTCDeliveryNameSuffix(suffixLength)
++		if err != nil {
++			return "", "", err
++		}
++		deliverySuffix, err := newTCDeliveryNameSuffix(suffixLength)
++		if err != nil {
++			return "", "", err
++		}
++		redirectName := prefix + redirectSuffix
++		deliveryName := prefix + deliverySuffix
++		if redirectName == deliveryName {
++			continue
+ 		}
+ 		_, redirectErr := netlink.LinkByName(redirectName)
+ 		_, deliveryErr := netlink.LinkByName(deliveryName)
+@@ -67,6 +87,14 @@ func nextTCVethNames() (string, string, error) {
+ 	return "", "", E.New("unable to allocate TC eBPF delivery link name")
+ }
+ 
++func newTCDeliveryNameSuffix(length int) (string, error) {
++	raw := make([]byte, (length+1)/2)
++	if _, err := rand.Read(raw); err != nil {
++		return "", err
++	}
++	return hex.EncodeToString(raw)[:length], nil
++}
++
+ // These settings are applied only inside the caller-owned private namespace.
+ // Namespace destruction owns their lifetime; no host-global restore list exists.
+ func tcInterfaceSysctlPath(interfaceName, setting string) string {
+diff --git a/runtime/tc_delivery_link_netns_test.go b/runtime/tc_delivery_link_netns_test.go
+index 03778a4..42d23cb 100644
+--- a/runtime/tc_delivery_link_netns_test.go
++++ b/runtime/tc_delivery_link_netns_test.go
+@@ -23,7 +23,7 @@ func deliveryPairLeftBehind(t *testing.T) []string {
+ 	var leftBehind []string
+ 	for _, device := range links {
+ 		name := device.Attrs().Name
+-		if strings.HasPrefix(name, "sbt") || strings.HasPrefix(name, "sbd") {
++		if strings.HasPrefix(name, "sb-veth-") || strings.HasPrefix(name, "sb-netkit-") {
+ 			leftBehind = append(leftBehind, name)
+ 		}
+ 	}
 diff --git a/runtime/tc_isolated_delivery.go b/runtime/tc_isolated_delivery.go
-index 335242f..005f9d7 100644
+index 335242f..3af5358 100644
 --- a/runtime/tc_isolated_delivery.go
 +++ b/runtime/tc_isolated_delivery.go
+@@ -51,7 +51,7 @@ func (d *tcDataPlane) inNamespace(block func() error) error {
+ }
+ 
+ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+-	hostName, peerName, err := nextTCVethNames()
++	hostName, peerName, err := nextTCDeliveryNames(d.deliveryKind)
+ 	if err != nil {
+ 		return nil, err
+ 	}
 @@ -69,18 +69,12 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
  		n.access.RUnlock()
  		return nil, os.ErrClosed
