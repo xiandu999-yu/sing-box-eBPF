@@ -146,6 +146,45 @@ jobs:
           path: build-info.txt
           retention-days: 7
 
+  test:
+    name: Delivery tests
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    needs:
+      - version
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Checkout sing-box
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ needs.version.outputs.repository }}
+          ref: ${{ needs.version.outputs.commit }}
+          path: src
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: src/go.mod
+          cache: true
+          cache-dependency-path: src/go.sum
+
+      - name: Apply patches
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          sed -i 's/\r$//' .github/scripts/apply-patches.sh
+          bash .github/scripts/apply-patches.sh src
+
+      # 需要 root：在临时 netns 之外建一次 sb-netkit-* 再删掉。
+      - name: Delivery integration tests
+        shell: bash
+        working-directory: ${{ github.workspace }}/modules/sing-ebpf
+        run: |
+          sudo env "PATH=$PATH" GOMODCACHE=/tmp/go-mod GOCACHE=/tmp/go-cache \
+            go test -tags "with_ebpf ebpf_integration" ./runtime -run 'ProbeDelivery' -v
+
   build-linux:
     name: Linux ${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) }}${{ matrix.go386 && format('_{0}', matrix.go386) }}${{ matrix.gomips && format('_{0}', matrix.gomips) }}
     runs-on: ubuntu-26.04
