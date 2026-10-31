@@ -129,3 +129,22 @@ func tcxPriorityOf(backend *commonEBPF.TCBackend, fallback uint16) uint16 {
    `tcx_priority` / `tcx_position` 对它们同样生效；只有内核不支持 TCX，或无法读取/记录 TCX 顺序（缺权限）时才回退 clsact。
 3. **netkit 需要内核 ≥ 6.7** 并启用 netkit 支持；OpenWrt 24.10（6.6）不可用，运行时会明确报错。
 4. 一个 sing-box 实例仍只能有一个 `local` 接管。
+
+
+## L3 交付（实验性，默认不可用）
+
+delivery 允许 
+etkit-l3，控制块新增 delivery_mode（复用原 reserved 字段，不改变结构大小），
+交付时用 skb_adjust_room(-14, BPF_ADJ_ROOM_MAC) 去掉以太头，回程用 isolated_return_l3 从 IP 头解析。
+
+**当前状态：链路能建立、能启动，但客户端流量不通。** 已确认：
+
+- 控制块注入正确（delivery_mode=1、delivery_ifindex 指向 netkit 设备、MAC 全零）；
+- TCX 挂载正确（sb_tc_share_l2 在 eth1/eth2，sb_tc_return 在 netkit 宿主端）；
+- sb_tc_stats 计数器全零，说明包在选择之后、交付之前被丢弃。
+
+待查方向：skb_adjust_room 的运行时返回值、netkit L3 xmit 对 headerless skb 的要求、
+sk_assign 在无 L2 帧上的行为。
+
+**在问题定位前请勿配置 delivery: netkit-l3**；eth / 
+etkit / uto 均正常。

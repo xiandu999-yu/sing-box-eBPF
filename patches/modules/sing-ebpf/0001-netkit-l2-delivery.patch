@@ -713,10 +713,22 @@ index 86c87a4..9992805 100644
  	for _, attached := range programs {
  		other, marked, err := tcxProgramOrder(attached.ID)
 diff --git a/native/tc.bpf.c b/native/tc.bpf.c
-index a898f01..c1c73b1 100644
+index a898f01..3bd9336 100644
 --- a/native/tc.bpf.c
 +++ b/native/tc.bpf.c
-@@ -91,7 +91,7 @@ struct sb_tc_control {
+@@ -81,7 +81,10 @@
+ #define SB_TC_STAT_RETURN_UPDATE_FAILURE 5U
+ #define SB_TC_STAT_RETURN_CONFLICT 6U
+ #define SB_TC_STAT_RETURN_LOOKUP_FAILURE 7U
+-#define SB_TC_STAT_COUNT 8U
++// 临时诊断：L3 交付是否进入、去头是否成功
++#define SB_TC_STAT_DELIVERY_ENTER 8U
++#define SB_TC_STAT_DELIVERY_STRIPPED 9U
++#define SB_TC_STAT_COUNT 10U
+ 
+ struct sb_tc_control {
+     __u32 enabled;
+@@ -91,7 +94,7 @@ struct sb_tc_control {
      __u16 listener_port;
      __u16 reserved_policy[2];
      __u8 delivery_mac[6];
@@ -725,7 +737,7 @@ index a898f01..c1c73b1 100644
  };
  
  struct sb_tc_uid_key {
-@@ -268,6 +268,8 @@ static long (*skb_store_bytes)(void *ctx, __u32 offset, const void *from, __u32
+@@ -268,6 +271,8 @@ static long (*skb_store_bytes)(void *ctx, __u32 offset, const void *from, __u32
      (void *)BPF_FUNC_skb_store_bytes;
  static long (*skb_change_head)(void *ctx, __u32 length, __u64 flags) =
      (void *)BPF_FUNC_skb_change_head;
@@ -735,21 +747,23 @@ index a898f01..c1c73b1 100644
      __u32 tuple_size, __u64 netns, __u64 flags) = (void *)BPF_FUNC_skc_lookup_tcp;
  static struct bpf_sock *(*sk_lookup_udp)(void *ctx, struct bpf_sock_tuple *tuple,
 diff --git a/native/tc_isolation.h b/native/tc_isolation.h
-index 5cccc00..beedebb 100644
+index 5cccc00..01919ad 100644
 --- a/native/tc_isolation.h
 +++ b/native/tc_isolation.h
-@@ -64,7 +64,9 @@ INLINE __u32 assignment_record(const struct sb_tc_assign_key *flow, __u8 tcp_fla
+@@ -64,7 +64,11 @@ INLINE __u32 assignment_record(const struct sb_tc_assign_key *flow, __u8 tcp_fla
  }
  
  INLINE int deliver_isolated(struct __sk_buff *skb, const struct sb_tc_control *control, bool ethernet) {
 -    if (ethernet) {
++    increment_stat(SB_TC_STAT_DELIVERY_ENTER);
 +    if (control->delivery_mode != 0U) {
 +        if (skb_adjust_room(skb, -(int)sizeof(struct ethernet_header), BPF_ADJ_ROOM_MAC, 0U) != 0) return TC_ACT_SHOT;
++        increment_stat(SB_TC_STAT_DELIVERY_STRIPPED);
 +    } else if (ethernet) {
          if (skb_store_bytes(skb, 0U, control->delivery_mac, 6U, 0U) != 0) return TC_ACT_SHOT;
      } else {
          struct ethernet_header header = {.protocol = skb->protocol};
-@@ -80,6 +82,7 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
+@@ -80,6 +84,7 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
      const struct sb_tc_assign_key *flow, __u64 cookie, __u32 flags) {
      bool record = (flags & SB_TC_REDIRECT_RECORD) != 0U;
      flags &= ~SB_TC_REDIRECT_RECORD;
@@ -757,7 +771,7 @@ index 5cccc00..beedebb 100644
      bool ethernet = (flags & SB_TC_RETURN_ETHERNET) != 0U;
      __u8 path = flags & 0xffU;
      __u64 now = ktime_get_ns();
-@@ -133,14 +136,14 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
+@@ -133,14 +138,14 @@ NOINLINE int redirect_isolated(struct __sk_buff *skb, const struct sb_tc_control
      return deliver_isolated(skb, control, ethernet);
  }
  
@@ -774,7 +788,7 @@ index 5cccc00..beedebb 100644
      struct bpf_sock *socket;
      if (!udp_only && flow.protocol == IPPROTO_TCP_VALUE) {
          socket = legacy ? lookup_tcp_socket_legacy(skb, control, &flow) : lookup_tcp_socket(skb, &flow);
-@@ -174,14 +177,22 @@ INLINE int isolated_delivery(struct __sk_buff *skb, bool legacy, bool udp_only)
+@@ -174,14 +179,22 @@ INLINE int isolated_delivery(struct __sk_buff *skb, bool legacy, bool udp_only)
  }
  
  SEC("classifier/isolated_delivery")
@@ -802,7 +816,7 @@ index 5cccc00..beedebb 100644
      const struct sb_tc_control *control = load_control();
      if (control == 0 || control->enabled == 0U) return TC_ACT_SHOT;
      struct sb_tc_assign_key flow;
-@@ -191,7 +202,21 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
+@@ -191,7 +204,21 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
      void *end = (void *)(long)skb->data_end;
      __u16 protocol;
      __u32 offset;
@@ -825,7 +839,7 @@ index 5cccc00..beedebb 100644
      if (protocol == ETH_P_IP_VALUE) {
          if (fill_ipv4_key(data, end, offset, control, &flow, &fragment, 0) != SB_TC_PARSE_FLOW) return TC_ACT_SHOT;
      } else if (protocol == ETH_P_IPV6_VALUE) {
-@@ -232,3 +257,8 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
+@@ -232,3 +259,8 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
      skb->mark = 0U;
      return redirect(value.ifindex, (value.flags & 0xffU) == SB_TC_PATH_DELIVERY ? BPF_F_INGRESS : 0U);
  }
