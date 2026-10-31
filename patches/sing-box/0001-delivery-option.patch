@@ -1,3 +1,57 @@
+diff --git a/adapter/ebpf.go b/adapter/ebpf.go
+index 7ec6120..a694eee 100644
+--- a/adapter/ebpf.go
++++ b/adapter/ebpf.go
+@@ -77,6 +77,7 @@ type EBPFRuntimeDiagnostics struct {
+ 	TCBackendMode                 string
+ 	TCListenerLookupMode          string
+ 	TCAttachmentMode              string
++	TCDeliveryKind                string
+ 	TCDeliveryInterface           string
+ 	TCNetworkNamespace            string
+ 	TCDeliveryInterfaceIndex      int
+diff --git a/cmd/sing-box/cmd_tools_ebpf.go b/cmd/sing-box/cmd_tools_ebpf.go
+index eadef9e..f0fd6be 100644
+--- a/cmd/sing-box/cmd_tools_ebpf.go
++++ b/cmd/sing-box/cmd_tools_ebpf.go
+@@ -7,6 +7,7 @@ import (
+ 	"os"
+ 
+ 	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
++	ebpfRuntime "github.com/CHIZI-0618/sing-ebpf/runtime"
+ 	"github.com/sagernet/sing-box/log"
+ 
+ 	"github.com/spf13/cobra"
+@@ -24,6 +25,7 @@ var (
+ 	commandEBPFStatusJSON       bool
+ 	commandEBPFStatusFakeIPICMP bool
+ 	commandEBPFStatusProcess    bool
++	commandEBPFStatusDelivery   string
+ )
+ 
+ var commandEBPF = &cobra.Command{
+@@ -54,6 +56,7 @@ func init() {
+ 	commandEBPFStatus.Flags().BoolVar(&commandEBPFStatusJSON, "json", false, "Write the report as JSON")
+ 	commandEBPFStatus.Flags().BoolVar(&commandEBPFStatusFakeIPICMP, "fakeip-icmp", false, "Also inspect fakeip_icmp=reply support")
+ 	commandEBPFStatus.Flags().BoolVar(&commandEBPFStatusProcess, "process-tracking", false, "Also inspect optional process tracking support")
++	commandEBPFStatus.Flags().StringVar(&commandEBPFStatusDelivery, "probe-delivery", "", "Create and remove a delivery pair of this kind: veth, netkit or auto")
+ 	commandEBPF.AddCommand(commandEBPFStatus)
+ 	commandTools.AddCommand(commandEBPF)
+ }
+@@ -64,6 +67,13 @@ func runEBPFStatus() error {
+ 	if commandEBPFStatusInterface != "" {
+ 		interfaceNames = []string{commandEBPFStatusInterface}
+ 	}
++	if commandEBPFStatusDelivery != "" {
++		actual, probeErr := ebpfRuntime.ProbeDelivery(commandEBPFStatusDelivery)
++		if probeErr != nil {
++			return fmt.Errorf("probe delivery %s: %w", commandEBPFStatusDelivery, probeErr)
++		}
++		fmt.Println("delivery probe: created", actual)
++	}
+ 	report, err := commonEBPF.ProbeKernel(commonEBPF.KernelProbeOptions{
+ 		Mode:                mode,
+ 		LocalDataPlane:      commonEBPF.KernelProbeDataPlane(commandEBPFStatusLocal),
 diff --git a/option/ebpf.go b/option/ebpf.go
 index fb2474a..affe55c 100644
 --- a/option/ebpf.go
@@ -34,14 +88,49 @@ index fb2474a..affe55c 100644
  	Interface            badoption.Listable[string]       `json:"interface,omitempty"`
  	IPv6                 *bool                            `json:"ipv6,omitempty"`
 diff --git a/protocol/ebpf/diagnostics.go b/protocol/ebpf/diagnostics.go
-index e427125..009d0bd 100644
+index e427125..d435e90 100644
 --- a/protocol/ebpf/diagnostics.go
 +++ b/protocol/ebpf/diagnostics.go
-@@ -1173,5 +1173,6 @@ func (i *Inbound) logStartupSummary() {
+@@ -143,6 +143,7 @@ type EBPFDiagnostics struct {
+ 	TCBackendMode                 string     `json:"tc_backend_mode,omitempty"`
+ 	TCListenerLookupMode          string     `json:"tc_listener_lookup_mode,omitempty"`
+ 	TCAttachmentMode              string     `json:"tc_attachment_mode,omitempty"`
++	TCDeliveryKind                string     `json:"tc_delivery_kind,omitempty"`
+ 	TCDeliveryInterface           string     `json:"tc_delivery_interface,omitempty"`
+ 	TCNetworkNamespace            string     `json:"tc_network_namespace,omitempty"`
+ 	TCDeliveryInterfaceIndex      int        `json:"tc_delivery_interface_index,omitempty"`
+@@ -402,6 +403,7 @@ func diagnosticsForAPI(diagnostics EBPFDiagnostics) adapter.EBPFRuntimeDiagnosti
+ 		TCBackendMode:                 diagnostics.TCBackendMode,
+ 		TCListenerLookupMode:          diagnostics.TCListenerLookupMode,
+ 		TCAttachmentMode:              diagnostics.TCAttachmentMode,
++		TCDeliveryKind:                diagnostics.TCDeliveryKind,
+ 		TCDeliveryInterface:           diagnostics.TCDeliveryInterface,
+ 		TCNetworkNamespace:            diagnostics.TCNetworkNamespace,
+ 		TCDeliveryInterfaceIndex:      diagnostics.TCDeliveryInterfaceIndex,
+@@ -645,6 +647,7 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
+ 		tc := tcDataPlane.TCDiagnostics()
+ 		diagnostics.TCListenerLookupMode = tc.ListenerLookupMode
+ 		diagnostics.TCAttachmentMode = tc.AttachmentMode
++		diagnostics.TCDeliveryKind = tc.DeliveryKind
+ 		diagnostics.TCDeliveryInterface = tc.NetworkInfo.DeliveryInterface
+ 		diagnostics.TCNetworkNamespace = tc.NetworkInfo.Namespace
+ 		diagnostics.TCDeliveryInterfaceIndex = tc.NetworkInfo.DeliveryInterfaceIndex
+@@ -1166,6 +1169,9 @@ func (i *Inbound) logStartupSummary() {
+ 		}
+ 	}
+ 
++	if i.delivery == deliveryAuto && diagnostics.TCDeliveryKind == deliveryVeth {
++		i.logger.Warn("netkit is unavailable on this kernel, delivery falls back to veth")
++	}
+ 	i.logger.Info("eBPF ", ebpfStructuredEvent("inbound_start", map[string]any{
+ 		"state":              diagnostics.State,
+ 		"configured_paths":   paths,
+@@ -1173,5 +1179,7 @@ func (i *Inbound) logStartupSummary() {
  		"waiting_paths":      waiting,
  		"waiting_interfaces": waitingInterfaces,
  		"fakeip_icmp":        fakeIPICMPSummary,
 +		"delivery":           i.delivery,
++		"delivery_used":      diagnostics.TCDeliveryKind,
  	}))
  }
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go

@@ -62,6 +62,18 @@ index 711519b..d7684a2 100644
  func (h TCBackendHandle) tcBackend() *TCBackend {
  	return h.backend
  }
+diff --git a/internal/core/diagnostics.go b/internal/core/diagnostics.go
+index 8c4079d..ec95418 100644
+--- a/internal/core/diagnostics.go
++++ b/internal/core/diagnostics.go
+@@ -44,5 +44,7 @@ type TCDiagnostics struct {
+ 	RetiredAttachmentCount int
+ 	RetiredDeliveryCount   int
+ 	Priority               uint16
++	// DeliveryKind is the delivery link actually created ("veth" or "netkit").
++	DeliveryKind           string
+ 	RequiresRebuild        bool
+ }
 diff --git a/internal/core/tc.go b/internal/core/tc.go
 index 3ec9cae..a47911d 100644
 --- a/internal/core/tc.go
@@ -175,6 +187,29 @@ index 86c87a4..9992805 100644
  func tcxPriorityAnchor(programs []link.AttachedProgram, priority uint16) (link.Anchor, error) {
  	for _, attached := range programs {
  		other, marked, err := tcxProgramOrder(attached.ID)
+diff --git a/runtime/api.go b/runtime/api.go
+index e21cb55..d51c68a 100644
+--- a/runtime/api.go
++++ b/runtime/api.go
+@@ -155,6 +155,10 @@ func (d *tcDataPlane) TCDiagnostics() core.TCDiagnostics {
+ 		info.RoutingPriority = d.routing.priority
+ 		info.RoutingSlot = d.routing.slot
+ 	}
++	deliveryKind := ""
++	if d.delivery != nil {
++		deliveryKind = d.delivery.deliveryKind
++	}
+ 	mode := ""
+ 	for _, attachment := range d.attachments {
+ 		if attachment.attachmentType == "" {
+@@ -180,6 +184,7 @@ func (d *tcDataPlane) TCDiagnostics() core.TCDiagnostics {
+ 		RetiredAttachmentCount: len(d.retiredAttachments),
+ 		RetiredDeliveryCount:   len(d.retiredDeliveries),
+ 		Priority:               d.priority,
++		DeliveryKind:           deliveryKind,
+ 		RequiresRebuild:        requiresRebuild,
+ 	}
+ }
 diff --git a/runtime/core_access.go b/runtime/core_access.go
 index b469b01..4bbc333 100644
 --- a/runtime/core_access.go
@@ -321,7 +356,7 @@ index 31d06ac..31bc510 100644
  				if added {
  					return E.Errors(err, closeTCXRoleLink(attachment, local))
 diff --git a/runtime/tc_delivery.go b/runtime/tc_delivery.go
-index b52004a..11ee2aa 100644
+index b52004a..95bb342 100644
 --- a/runtime/tc_delivery.go
 +++ b/runtime/tc_delivery.go
 @@ -4,12 +4,16 @@ package runtime
@@ -342,7 +377,7 @@ index b52004a..11ee2aa 100644
  	"github.com/sagernet/netlink"
  	E "github.com/sagernet/sing/common/exceptions"
  )
-@@ -44,13 +48,33 @@ func tcDeliveryMACAddress(link netlink.Link) (commonEBPF.MACAddress, bool) {
+@@ -44,13 +48,38 @@ func tcDeliveryMACAddress(link netlink.Link) (commonEBPF.MACAddress, bool) {
  }
  
  func nextTCVethNames() (string, string, error) {
@@ -356,9 +391,14 @@ index b52004a..11ee2aa 100644
 +func nextTCDeliveryNames(kind string) (string, string, error) {
 +	prefix := "sb-veth-"
 +	suffixLength := 6
-+	if kind == DeliveryNetkit {
++	switch kind {
++	case DeliveryNetkit:
 +		prefix = "sb-netkit-"
 +		suffixLength = 5
++	case DeliveryAuto:
++		// The device may still fall back to veth, so keep the name neutral
++		// instead of claiming a kind that was not used.
++		prefix = "sb-dlv-"
 +	}
  	for range 1024 {
 -		sequence := tcVethSequence.Add(1)
@@ -382,7 +422,7 @@ index b52004a..11ee2aa 100644
  		}
  		_, redirectErr := netlink.LinkByName(redirectName)
  		_, deliveryErr := netlink.LinkByName(deliveryName)
-@@ -67,6 +91,14 @@ func nextTCVethNames() (string, string, error) {
+@@ -67,6 +96,14 @@ func nextTCVethNames() (string, string, error) {
  	return "", "", E.New("unable to allocate TC eBPF delivery link name")
  }
  
@@ -397,7 +437,7 @@ index b52004a..11ee2aa 100644
  // These settings are applied only inside the caller-owned private namespace.
  // Namespace destruction owns their lifetime; no host-global restore list exists.
  func tcInterfaceSysctlPath(interfaceName, setting string) string {
-@@ -87,8 +119,70 @@ func setTCSysctl(path, value string) (bool, error) {
+@@ -87,8 +124,70 @@ func setTCSysctl(path, value string) (bool, error) {
  	return true, nil
  }
  
@@ -632,10 +672,10 @@ index 335242f..0278887 100644
  	}
 diff --git a/runtime/tc_netkit.go b/runtime/tc_netkit.go
 new file mode 100644
-index 0000000..993cdf5
+index 0000000..aa4fd9d
 --- /dev/null
 +++ b/runtime/tc_netkit.go
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,136 @@
 +//go:build with_ebpf && (linux || android)
 +
 +package runtime
@@ -694,7 +734,9 @@ index 0000000..993cdf5
 +		LinkAttrs:        netlink.LinkAttrs{Name: hostName, MTU: mtu, HardwareAddr: hostAddress},
 +		PeerName:         peerName,
 +		PeerHardwareAddr: peerAddress,
-+		PeerNamespace:    netlink.NsFd(namespaceFD),
++	}
++	if namespaceFD >= 0 {
++		veth.PeerNamespace = netlink.NsFd(namespaceFD)
 +	}
 +	if err := netlink.LinkAdd(veth); err != nil {
 +		return nil, E.Cause(err, "create isolated TC veth (CONFIG_VETH and CAP_NET_ADMIN required)")
@@ -711,6 +753,28 @@ index 0000000..993cdf5
 +		return nil, E.Cause(err, "find TC eBPF netkit link")
 +	}
 +	return link, nil
++}
++
++// ProbeDelivery creates and immediately removes a delivery pair of the given
++// kind in the current network namespace and reports the kind that was actually
++// created. It is the explicit, opt-in mutation used by `tools ebpf status`.
++func ProbeDelivery(kind string) (string, error) {
++	hostName, peerName, err := nextTCDeliveryNames(kind)
++	if err != nil {
++		return "", err
++	}
++	link, actual, err := createTCDeliveryPair(kind, hostName, peerName, nil, nil, -1, tcDeliveryMTU)
++	if err == nil && link != nil {
++		_ = netlink.LinkDel(link)
++	}
++	// Deleting one end removes the pair; make sure nothing is left behind.
++	if remaining, lookupErr := netlink.LinkByName(hostName); lookupErr == nil {
++		_ = netlink.LinkDel(remaining)
++	}
++	if err != nil {
++		return "", err
++	}
++	return actual, nil
 +}
 +
 +// addNetkitPair issues RTM_NEWLINK by hand: sagernet/netlink's LinkAdd has a
@@ -737,7 +801,9 @@ index 0000000..993cdf5
 +	if len(peerAddress) > 0 {
 +		peer.AddRtAttr(unix.IFLA_ADDRESS, peerAddress)
 +	}
-+	peer.AddRtAttr(unix.IFLA_NET_NS_FD, nl.Uint32Attr(uint32(namespaceFD)))
++	if namespaceFD >= 0 {
++		peer.AddRtAttr(unix.IFLA_NET_NS_FD, nl.Uint32Attr(uint32(namespaceFD)))
++	}
 +
 +	request.AddData(linkInfo)
 +
