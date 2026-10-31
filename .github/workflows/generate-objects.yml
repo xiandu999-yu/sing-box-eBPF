@@ -1,0 +1,64 @@
+name: Generate BPF objects
+
+# L3 需要新增 BPF section，而对象必须用 Android NDK r29 Clang 21 重新生成。
+# 这个工作流只做「生成 + 上传」，不会提交任何东西；生成结果由维护者下载后
+# 用 git diff --binary 合进模块补丁。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: Generate objects
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Checkout sing-box
+        uses: actions/checkout@v6
+        with:
+          repository: reF1nd/sing-box
+          ref: reF1nd-stable
+          path: src
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: src/go.mod
+          cache: true
+          cache-dependency-path: src/go.sum
+
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r29
+          add-to-path: false
+
+      - name: Apply patches
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          sed -i 's/\r$//' .github/scripts/apply-patches.sh
+          bash .github/scripts/apply-patches.sh src
+
+      - name: Generate BPF objects
+        working-directory: ${{ github.workspace }}/modules/sing-ebpf
+        env:
+          NDK_TOOLCHAIN: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64
+        run: |
+          make generate
+          git status --short
+
+      - name: Upload generated objects
+        uses: actions/upload-artifact@v6
+        with:
+          name: bpfgen
+          path: modules/sing-ebpf/internal/bpfgen
+          if-no-files-found: error
+          retention-days: 7
