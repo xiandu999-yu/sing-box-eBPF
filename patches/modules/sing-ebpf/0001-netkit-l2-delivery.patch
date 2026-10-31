@@ -713,7 +713,7 @@ index 86c87a4..9992805 100644
  	for _, attached := range programs {
  		other, marked, err := tcxProgramOrder(attached.ID)
 diff --git a/native/tc.bpf.c b/native/tc.bpf.c
-index a898f01..23f9da1 100644
+index a898f01..c1c73b1 100644
 --- a/native/tc.bpf.c
 +++ b/native/tc.bpf.c
 @@ -91,7 +91,7 @@ struct sb_tc_control {
@@ -725,8 +725,17 @@ index a898f01..23f9da1 100644
  };
  
  struct sb_tc_uid_key {
+@@ -268,6 +268,8 @@ static long (*skb_store_bytes)(void *ctx, __u32 offset, const void *from, __u32
+     (void *)BPF_FUNC_skb_store_bytes;
+ static long (*skb_change_head)(void *ctx, __u32 length, __u64 flags) =
+     (void *)BPF_FUNC_skb_change_head;
++static long (*skb_adjust_room)(void *ctx, __s32 len_diff, __u32 mode, __u64 flags) =
++    (void *)BPF_FUNC_skb_adjust_room;
+ static struct bpf_sock *(*skc_lookup_tcp)(void *ctx, struct bpf_sock_tuple *tuple,
+     __u32 tuple_size, __u64 netns, __u64 flags) = (void *)BPF_FUNC_skc_lookup_tcp;
+ static struct bpf_sock *(*sk_lookup_udp)(void *ctx, struct bpf_sock_tuple *tuple,
 diff --git a/native/tc_isolation.h b/native/tc_isolation.h
-index 5cccc00..3966a84 100644
+index 5cccc00..beedebb 100644
 --- a/native/tc_isolation.h
 +++ b/native/tc_isolation.h
 @@ -64,7 +64,9 @@ INLINE __u32 assignment_record(const struct sb_tc_assign_key *flow, __u8 tcp_fla
@@ -735,7 +744,7 @@ index 5cccc00..3966a84 100644
  INLINE int deliver_isolated(struct __sk_buff *skb, const struct sb_tc_control *control, bool ethernet) {
 -    if (ethernet) {
 +    if (control->delivery_mode != 0U) {
-+        if (bpf_skb_adjust_room(skb, -(int)sizeof(struct ethernet_header), BPF_ADJ_ROOM_MAC, 0U) != 0) return TC_ACT_SHOT;
++        if (skb_adjust_room(skb, -(int)sizeof(struct ethernet_header), BPF_ADJ_ROOM_MAC, 0U) != 0) return TC_ACT_SHOT;
 +    } else if (ethernet) {
          if (skb_store_bytes(skb, 0U, control->delivery_mac, 6U, 0U) != 0) return TC_ACT_SHOT;
      } else {
