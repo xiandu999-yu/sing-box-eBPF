@@ -336,10 +336,15 @@ jobs:
             *) echo "object differs from upstream: patched objects are in use" ;;
           esac
           # 再问 Go 一次：编译时实际使用的 bpfgen 包目录在哪、内容是什么
-          pkg_dir="$(go list -f '{{.Dir}}' github.com/CHIZI-0618/sing-ebpf/internal/bpfgen)"
+          # 注意 bpfgen 的源文件带 with_ebpf 约束，查询时必须带上同样的 tags
+          pkg_dir="$(go list -tags with_ebpf -f '{{.Dir}}' github.com/CHIZI-0618/sing-ebpf/internal/bpfgen)"
           echo "bpfgen package dir: ${pkg_dir}"
           ls -l "${pkg_dir}"
           sha256sum "${pkg_dir}"/tc_bpfel.go "${pkg_dir}"/tc_bpfel.o
+
+      # 排除 Go 构建缓存导致的「输入新、产物旧」
+      - name: Clean Go build cache
+        run: go clean -cache
 
       - name: Build
         run: |
