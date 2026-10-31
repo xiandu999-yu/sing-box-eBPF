@@ -244,7 +244,7 @@ index 86c87a4..9992805 100644
  	for _, attached := range programs {
  		other, marked, err := tcxProgramOrder(attached.ID)
 diff --git a/native/tc.bpf.c b/native/tc.bpf.c
-index a898f01..d128219 100644
+index a898f01..b51ebce 100644
 --- a/native/tc.bpf.c
 +++ b/native/tc.bpf.c
 @@ -81,7 +81,10 @@
@@ -274,7 +274,7 @@ index a898f01..d128219 100644
      (void *)BPF_FUNC_skb_change_head;
 +static long (*skb_adjust_room)(void *ctx, __s32 len_diff, __u32 mode, __u64 flags) =
 +    (void *)BPF_FUNC_skb_adjust_room;
-+static long (*redirect_peer)(void *ctx, __u32 ifindex, __u64 flags) =
++static long (*redirect_peer)(__u32 ifindex, __u64 flags) =
 +    (void *)BPF_FUNC_redirect_peer;
  static struct bpf_sock *(*skc_lookup_tcp)(void *ctx, struct bpf_sock_tuple *tuple,
      __u32 tuple_size, __u64 netns, __u64 flags) = (void *)BPF_FUNC_skc_lookup_tcp;
