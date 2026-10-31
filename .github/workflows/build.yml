@@ -198,7 +198,10 @@ jobs:
       - name: Apply patches
         shell: bash
         working-directory: ${{ github.workspace }}
-        run: bash .github/scripts/apply-patches.sh src
+        run: |
+          # 仓库里可能残留 CRLF，先去掉再执行，否则 bash 会因为 \r 报错
+          sed -i 's/\r$//' .github/scripts/apply-patches.sh
+          bash .github/scripts/apply-patches.sh src
 
       - name: Build
         run: |

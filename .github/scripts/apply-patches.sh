@@ -36,7 +36,11 @@ apply_patches() {
 	[ ${#files[@]} -gt 0 ] || return 0
 	for file in "${files[@]}"; do
 		echo "::group::apply ${file#"$ROOT/"} -> ${label}"
-		git -C "$target" apply --3way --whitespace=nowarn "$file"
+		# 补丁文件也可能是 CRLF，复制成 LF 临时文件再套用
+		cleaned="$(mktemp)"
+		tr -d '\r' < "$file" > "$cleaned"
+		git -C "$target" apply --3way --whitespace=nowarn "$cleaned"
+		rm -f "$cleaned"
 		echo "::endgroup::"
 	done
 }
