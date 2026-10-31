@@ -114,8 +114,9 @@ func tcxPriorityOf(backend *commonEBPF.TCBackend, fallback uint16) uint16 {
 | `internal/core/tc.go` | 配置字段 + backend 保存上述状态 |
 | `internal/core/access.go` | 新增 `DeliveryKind()` / `TCXPriority()` / `TCXPosition()` |
 | `runtime/tc_netkit.go`（新） | `createTCDeliveryPair` 分派、`addNetkitPair` 原始 netlink 建链 |
-| `runtime/tc_isolated_delivery.go` | 交付链路按 kind 创建 veth 或 netkit |
-| `runtime/tc_delivery.go` | 新设备命名（crypto/rand），`nextTCVethNames` 保留为兼容包装 |
+| `runtime/tc_isolated_delivery.go` | 交付链路按 kind 创建 veth 或 netkit；两个 hook 改为 TCX 优先 + clsact 回退 |
+| `runtime/tc_delivery.go` | 新设备命名；新增 `attachTCDeliveryHook` / `deliveryHookAttached` / `closeTCDeliveryHook` / `repairTCDeliveryHook` |
+| `internal/core/tc.go` | 新增 `DeliveryIngressProgram()` / `IsolatedReturnProgram()` 供 TCX 使用 |
 | `runtime/tc_dataplane.go` | `deliveryKind` 字段、`tcxPriorityOf`、4 处 TCX 挂载点改用新优先级；删除不再使用的 `tcVethSequence` |
 | `runtime/tc_delivery_link_netns_test.go` | 残留设备检测前缀同步为新命名 |
 
@@ -124,8 +125,7 @@ func tcxPriorityOf(backend *commonEBPF.TCBackend, fallback uint16) uint16 {
 ## 已知限制
 
 1. **netkit 只有 L2**。L3（去以太头直投）需要新增 delivery 的 raw-IP 程序变体并重新生成 `bpfel/bpfeb` 对象，尚未实现；内核在 L3 下也禁止设置 MAC。
-2. **交付链路仍是传统 clsact**。`sb_tc_return` / `sb_tc_deliver` 仍以 `*netlink.BpfFilter` 形式挂在 clsact 上，因此：
-   - `tcx_priority` / `tcx_position` 目前只影响接口选择程序（eth0 egress、eth1/eth2 ingress）；
-   - netkit 的 noqueue 优势在交付设备上会被 clsact 抵消一部分。
+2. **交付链路改为 TCX 优先、clsact 回退**。`sb_tc_return` / `sb_tc_deliver` 在支持 TCX 的内核上以 TCX link 挂载，
+   `tcx_priority` / `tcx_position` 对它们同样生效；只有内核不支持 TCX，或无法读取/记录 TCX 顺序（缺权限）时才回退 clsact。
 3. **netkit 需要内核 ≥ 6.7** 并启用 netkit 支持；OpenWrt 24.10（6.6）不可用，运行时会明确报错。
 4. 一个 sing-box 实例仍只能有一个 `local` 接管。

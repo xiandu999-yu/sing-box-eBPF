@@ -63,7 +63,7 @@ index 711519b..d7684a2 100644
  	return h.backend
  }
 diff --git a/internal/core/tc.go b/internal/core/tc.go
-index 3ec9cae..57b6856 100644
+index 3ec9cae..a47911d 100644
 --- a/internal/core/tc.go
 +++ b/internal/core/tc.go
 @@ -101,6 +101,12 @@ type TCConfig struct {
@@ -99,6 +99,19 @@ index 3ec9cae..57b6856 100644
  		selfMapExternal:    config.EnableLocal && config.SelfBypassMap != nil,
  	}
  	// From here, backend owns maps and loadedPrograms: giving up on either of the
+@@ -1111,6 +1123,12 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
+ 	}
+ }
+ 
++func (b *TCBackend) DeliveryIngressProgram() *CiliumEBPF.Program {
++	return b.program(tcProgramDeliveryIngress)
++}
++func (b *TCBackend) IsolatedReturnProgram() *CiliumEBPF.Program {
++	return b.program(tcProgramIsolatedReturn)
++}
+ func (b *TCBackend) DeliveryIngressProgramFD() int { return b.programFD(tcProgramDeliveryIngress) }
+ func (b *TCBackend) IsolatedReturnProgramFD() int  { return b.programFD(tcProgramIsolatedReturn) }
+ 
 diff --git a/internal/core/tcx_order.go b/internal/core/tcx_order.go
 index 86c87a4..9992805 100644
 --- a/internal/core/tcx_order.go
@@ -174,7 +187,7 @@ index b469b01..4bbc333 100644
 +// coreAttachTCXPositioned is the positioned variant used by head/tail.
 +var coreAttachTCXPositioned = core.AttachTCXPositioned
 diff --git a/runtime/tc_dataplane.go b/runtime/tc_dataplane.go
-index 31d06ac..48fb4e9 100644
+index 31d06ac..61ccdc0 100644
 --- a/runtime/tc_dataplane.go
 +++ b/runtime/tc_dataplane.go
 @@ -28,7 +28,6 @@ const (
@@ -185,7 +198,18 @@ index 31d06ac..48fb4e9 100644
  var tcxSupport atomic.Int32
  
  const (
-@@ -124,6 +123,7 @@ type tcDataPlane struct {
+@@ -113,6 +112,10 @@ type tcDeliveryLink struct {
+ 	redirect     netlink.Link
+ 	delivery     netlink.Link
+ 	filter       *netlink.BpfFilter
++	// returnLink / deliverLink hold the TCX attachments when the hook is not
++	// on clsact. Exactly one of link and filter is set per hook.
++	returnLink  tcxAttachedLink
++	deliverLink tcxAttachedLink
+ 	// deliveryMAC is the private end's address programmed into the backend
+ 	// as every redirected frame's destination.
+ 	deliveryMAC commonEBPF.MACAddress
+@@ -124,6 +127,7 @@ type tcDataPlane struct {
  	replyMTU              int
  	access                sync.Mutex
  	backend               *commonEBPF.TCBackend
@@ -193,7 +217,7 @@ index 31d06ac..48fb4e9 100644
  	routing               *tcPolicyRouting
  	delivery              *tcDeliveryLink
  	attachments           []*tcInterfaceAttachment
-@@ -211,6 +211,9 @@ func startTCDataPlane(
+@@ -211,6 +215,9 @@ func startTCDataPlane(
  	namespace *TCNamespace,
  ) (*tcDataPlane, error) {
  	dataPlane := &tcDataPlane{backend: backend, sharedSourceMACPolicy: sharedSourceMACPolicy, priority: priority}
@@ -203,7 +227,7 @@ index 31d06ac..48fb4e9 100644
  	dataPlane.namespace = namespace
  	dataPlane.enableIPv6 = enableIPv6
  	cleanup := func(startErr error) (*tcDataPlane, error) {
-@@ -525,6 +528,36 @@ func (a *tcInterfaceAttachment) attachSlotFilter(
+@@ -525,6 +532,36 @@ func (a *tcInterfaceAttachment) attachSlotFilter(
  	return attachFilter(link, identity.parent, programFD, identity.name, identity.handle, priority)
  }
  
@@ -240,7 +264,7 @@ index 31d06ac..48fb4e9 100644
  func tcxUnsupportedError(err error) bool {
  	return err != nil && (errors.Is(err, CiliumEBPF.ErrNotSupported) ||
  		errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS) ||
-@@ -557,7 +590,8 @@ func attachTCXInterface(linkDevice netlink.Link, backend *commonEBPF.TCBackend,
+@@ -557,7 +594,8 @@ func attachTCXInterface(linkDevice netlink.Link, backend *commonEBPF.TCBackend,
  			continue
  		}
  		mainLink, icmpLink, err := attachTCXProgramPair(
@@ -250,7 +274,7 @@ index 31d06ac..48fb4e9 100644
  		)
  		if err != nil {
  			return closeLinks(err)
-@@ -575,12 +609,13 @@ func attachTCXProgramPair(
+@@ -575,12 +613,13 @@ func attachTCXProgramPair(
  	icmpProgram *CiliumEBPF.Program,
  	icmpEnabled bool,
  	role string,
@@ -265,7 +289,7 @@ index 31d06ac..48fb4e9 100644
  	if err != nil {
  		return nil, nil, err
  	}
-@@ -590,7 +625,7 @@ func attachTCXProgramPair(
+@@ -590,7 +629,7 @@ func attachTCXProgramPair(
  	if icmpProgram == nil {
  		return nil, nil, E.Errors(E.New("icmp_echo_reply ", role, " reply program is unavailable"), mainLink.Close())
  	}
@@ -274,7 +298,7 @@ index 31d06ac..48fb4e9 100644
  	if err != nil {
  		return nil, nil, E.Errors(err, mainLink.Close())
  	}
-@@ -782,7 +817,7 @@ func updateTCXInterfaceAttachment(
+@@ -782,7 +821,7 @@ func updateTCXInterfaceAttachment(
  		added := false
  		if attached == nil {
  			var err error
@@ -283,7 +307,7 @@ index 31d06ac..48fb4e9 100644
  			if err != nil {
  				return err
  			}
-@@ -815,7 +850,7 @@ func updateTCXInterfaceAttachment(
+@@ -815,7 +854,7 @@ func updateTCXInterfaceAttachment(
  				}
  				return startErr
  			}
@@ -293,19 +317,28 @@ index 31d06ac..48fb4e9 100644
  				if added {
  					return E.Errors(err, closeTCXRoleLink(attachment, local))
 diff --git a/runtime/tc_delivery.go b/runtime/tc_delivery.go
-index b52004a..36d5a45 100644
+index b52004a..11ee2aa 100644
 --- a/runtime/tc_delivery.go
 +++ b/runtime/tc_delivery.go
-@@ -4,7 +4,7 @@ package runtime
+@@ -4,12 +4,16 @@ package runtime
  
  import (
  	"crypto/rand"
 -	"fmt"
 +	"encoding/hex"
++	"errors"
  	"net"
  	"os"
  	"strings"
-@@ -44,13 +44,33 @@ func tcDeliveryMACAddress(link netlink.Link) (commonEBPF.MACAddress, bool) {
+ 
++	CiliumEBPF "github.com/cilium/ebpf"
++
+ 	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
++	intcore "github.com/CHIZI-0618/sing-ebpf/internal/core"
+ 	"github.com/sagernet/netlink"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ )
+@@ -44,13 +48,33 @@ func tcDeliveryMACAddress(link netlink.Link) (commonEBPF.MACAddress, bool) {
  }
  
  func nextTCVethNames() (string, string, error) {
@@ -345,7 +378,7 @@ index b52004a..36d5a45 100644
  		}
  		_, redirectErr := netlink.LinkByName(redirectName)
  		_, deliveryErr := netlink.LinkByName(deliveryName)
-@@ -67,6 +87,14 @@ func nextTCVethNames() (string, string, error) {
+@@ -67,6 +91,14 @@ func nextTCVethNames() (string, string, error) {
  	return "", "", E.New("unable to allocate TC eBPF delivery link name")
  }
  
@@ -360,6 +393,78 @@ index b52004a..36d5a45 100644
  // These settings are applied only inside the caller-owned private namespace.
  // Namespace destruction owns their lifetime; no host-global restore list exists.
  func tcInterfaceSysctlPath(interfaceName, setting string) string {
+@@ -87,8 +119,70 @@ func setTCSysctl(path, value string) (bool, error) {
+ 	return true, nil
+ }
+ 
++// attachTCDeliveryHook attaches one delivery hook, preferring TCX and falling
++// back to clsact when TCX is unavailable on this kernel or hook.
++func attachTCDeliveryHook(device netlink.Link, program *CiliumEBPF.Program, programFD int, name string,
++	handle, priority uint16, backend *commonEBPF.TCBackend) (tcxAttachedLink, *netlink.BpfFilter, error) {
++	if program != nil {
++		attached, err := tcxAttach(device.Attrs().Index, CiliumEBPF.AttachTCXIngress, program, backend, priority)
++		if err == nil {
++			return attached, nil, nil
++		}
++		if !tcxUnsupportedError(err) && !errors.Is(err, intcore.ErrTCXOrderUnavailable) {
++			return nil, nil, E.Cause(err, "attach TCX ", name)
++		}
++	}
++	if err := ensureTCClsact(device); err != nil {
++		return nil, nil, err
++	}
++	filter, err := attachTCFilter(device, netlink.HANDLE_MIN_INGRESS, programFD, name, handle, priority)
++	if err != nil {
++		return nil, nil, err
++	}
++	return nil, filter, nil
++}
++
++func deliveryHookAttached(attached tcxAttachedLink, filter *netlink.BpfFilter, device netlink.Link,
++	name string, handle, priority uint16) (bool, error) {
++	if attached != nil {
++		return tcxLinkAttached(attached, device.Attrs().Index, CiliumEBPF.AttachTCXIngress)
++	}
++	return tcFilterAttached(device, netlink.HANDLE_MIN_INGRESS, name, handle, priority)
++}
++
++func closeTCDeliveryHook(attached *tcxAttachedLink, filter **netlink.BpfFilter) error {
++	if *attached != nil {
++		err := (*attached).Close()
++		if err == nil {
++			*attached = nil
++		}
++		return err
++	}
++	return detachTCFilterOwned(filter)
++}
++
++func repairTCDeliveryHook(attached *tcxAttachedLink, filter **netlink.BpfFilter, device netlink.Link,
++	program *CiliumEBPF.Program, programFD int, name string, handle, priority uint16,
++	backend *commonEBPF.TCBackend) (bool, error) {
++	live, err := deliveryHookAttached(*attached, *filter, device, name, handle, priority)
++	if err != nil || live {
++		return false, err
++	}
++	if *attached != nil {
++		_ = (*attached).Close()
++		*attached = nil
++	}
++	newLink, newFilter, err := attachTCDeliveryHook(device, program, programFD, name, handle, priority, backend)
++	if err != nil {
++		return false, err
++	}
++	*attached, *filter = newLink, newFilter
++	return true, nil
++}
++
+ func (d *tcDeliveryLink) IsClosed() bool {
+-	return d == nil || d.filter == nil && d.returnFilter == nil && d.redirect == nil && d.delivery == nil
++	return d == nil || d.filter == nil && d.returnFilter == nil &&
++		d.deliverLink == nil && d.returnLink == nil && d.redirect == nil && d.delivery == nil
+ }
+ 
+ func (d *tcDeliveryLink) Close() error {
 diff --git a/runtime/tc_delivery_link_netns_test.go b/runtime/tc_delivery_link_netns_test.go
 index 03778a4..42d23cb 100644
 --- a/runtime/tc_delivery_link_netns_test.go
@@ -374,7 +479,7 @@ index 03778a4..42d23cb 100644
  		}
  	}
 diff --git a/runtime/tc_isolated_delivery.go b/runtime/tc_isolated_delivery.go
-index 335242f..3af5358 100644
+index 335242f..183c4c6 100644
 --- a/runtime/tc_isolated_delivery.go
 +++ b/runtime/tc_isolated_delivery.go
 @@ -51,7 +51,7 @@ func (d *tcDataPlane) inNamespace(block func() error) error {
@@ -408,7 +513,7 @@ index 335242f..3af5358 100644
  	cleanup := func(cause error) (*tcDeliveryLink, error) {
  		err := E.Errors(cause, owner.Close())
  		if owner.IsClosed() {
-@@ -90,7 +84,7 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+@@ -90,17 +84,15 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
  	}
  	owner.redirect, err = d.linkByName()(hostName)
  	if err != nil {
@@ -417,6 +522,109 @@ index 335242f..3af5358 100644
  		return cleanup(E.Cause(err, "find TC eBPF redirect link"))
  	}
  	if err = netlink.LinkSetUp(owner.redirect); err != nil {
+ 		return cleanup(err)
+ 	}
+-	if err = ensureTCClsact(owner.redirect); err != nil {
+-		return cleanup(err)
+-	}
+-	owner.returnFilter, err = attachTCFilter(owner.redirect, netlink.HANDLE_MIN_INGRESS,
+-		rawTCBackend(d.backend).IsolatedReturnProgramFD(), "sb_tc_return", tcReturnFilterHandle, d.priority)
++	owner.returnLink, owner.returnFilter, err = attachTCDeliveryHook(owner.redirect,
++		rawTCBackend(d.backend).IsolatedReturnProgram(), rawTCBackend(d.backend).IsolatedReturnProgramFD(),
++		"sb_tc_return", tcReturnFilterHandle, d.priority, d.backend)
+ 	if err != nil {
+ 		return cleanup(err)
+ 	}
+@@ -113,11 +105,9 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+ 		if _, err = owner.configureIsolatedPeer(true); err != nil {
+ 			return err
+ 		}
+-		if err = ensureTCClsact(owner.delivery); err != nil {
+-			return err
+-		}
+-		owner.filter, err = attachTCFilter(owner.delivery, netlink.HANDLE_MIN_INGRESS,
+-			rawTCBackend(d.backend).DeliveryIngressProgramFD(), "sb_tc_deliver", tcDeliveryFilterHandle, d.priority)
++		owner.deliverLink, owner.filter, err = attachTCDeliveryHook(owner.delivery,
++			rawTCBackend(d.backend).DeliveryIngressProgram(), rawTCBackend(d.backend).DeliveryIngressProgramFD(),
++			"sb_tc_deliver", tcDeliveryFilterHandle, d.priority, d.backend)
+ 		return err
+ 	})
+ 	if err != nil {
+@@ -294,7 +284,7 @@ func (d *tcDeliveryLink) healthyIsolated(priority uint16) (bool, error) {
+ 	if mac, valid := tcDeliveryMACAddress(d.delivery); !valid || mac != d.deliveryMAC {
+ 		return false, nil
+ 	}
+-	live, err = tcFilterAttached(d.redirect, netlink.HANDLE_MIN_INGRESS, "sb_tc_return", tcReturnFilterHandle, priority)
++	live, err = deliveryHookAttached(d.returnLink, d.returnFilter, d.redirect, "sb_tc_return", tcReturnFilterHandle, priority)
+ 	if err != nil || !live {
+ 		return false, err
+ 	}
+@@ -304,7 +294,7 @@ func (d *tcDeliveryLink) healthyIsolated(priority uint16) (bool, error) {
+ 		if err != nil || !live {
+ 			return err
+ 		}
+-		live, err = tcFilterAttached(d.delivery, netlink.HANDLE_MIN_INGRESS, "sb_tc_deliver", tcDeliveryFilterHandle, priority)
++		live, err = deliveryHookAttached(d.deliverLink, d.filter, d.delivery, "sb_tc_deliver", tcDeliveryFilterHandle, priority)
+ 		return err
+ 	})
+ 	return live, err
+@@ -335,22 +325,12 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+ 		}
+ 		changed = true
+ 	}
+-	repairFilter := func(link netlink.Link, name string, handle uint16, fd int, target **netlink.BpfFilter) error {
+-		attached, err := tcFilterAttached(link, netlink.HANDLE_MIN_INGRESS, name, handle, priority)
+-		if err != nil || attached {
+-			return err
+-		}
+-		if err = ensureTCClsact(link); err != nil {
+-			return err
+-		}
+-		*target, err = attachTCFilter(link, netlink.HANDLE_MIN_INGRESS, fd, name, handle, priority)
+-		if err == nil {
+-			changed = true
+-		}
+-		return err
+-	}
+-	if err = repairFilter(d.redirect, "sb_tc_return", tcReturnFilterHandle, rawTCBackend(backend).IsolatedReturnProgramFD(), &d.returnFilter); err != nil {
+-		return changed, false, err
++	if repaired, repairErr := repairTCDeliveryHook(&d.returnLink, &d.returnFilter, d.redirect,
++		rawTCBackend(backend).IsolatedReturnProgram(), rawTCBackend(backend).IsolatedReturnProgramFD(),
++		"sb_tc_return", tcReturnFilterHandle, priority, backend); repairErr != nil {
++		return changed, false, repairErr
++	} else if repaired {
++		changed = true
+ 	}
+ 	err = d.namespace.with(func() error {
+ 		healthy, err := d.configureIsolatedPeer(true)
+@@ -358,17 +338,23 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+ 		if err != nil {
+ 			return err
+ 		}
+-		return repairFilter(d.delivery, "sb_tc_deliver", tcDeliveryFilterHandle, rawTCBackend(backend).DeliveryIngressProgramFD(), &d.filter)
++		repaired, repairErr := repairTCDeliveryHook(&d.deliverLink, &d.filter, d.delivery,
++			rawTCBackend(backend).DeliveryIngressProgram(), rawTCBackend(backend).DeliveryIngressProgramFD(),
++			"sb_tc_deliver", tcDeliveryFilterHandle, priority, backend)
++		if repaired {
++			changed = true
++		}
++		return repairErr
+ 	})
+ 	return changed, false, err
+ }
+ 
+ func (d *tcDeliveryLink) closeIsolated() error {
+-	if err := detachTCFilterOwned(&d.returnFilter); err != nil {
++	if err := closeTCDeliveryHook(&d.returnLink, &d.returnFilter); err != nil {
+ 		return err
+ 	}
+-	if d.filter != nil {
+-		if err := d.namespace.with(func() error { return detachTCFilterOwned(&d.filter) }); err != nil {
++	if d.filter != nil || d.deliverLink != nil {
++		if err := d.namespace.with(func() error { return closeTCDeliveryHook(&d.deliverLink, &d.filter) }); err != nil {
+ 			return err
+ 		}
+ 	}
 diff --git a/runtime/tc_netkit.go b/runtime/tc_netkit.go
 new file mode 100644
 index 0000000..945e9ac
