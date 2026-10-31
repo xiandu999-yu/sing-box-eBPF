@@ -1,0 +1,446 @@
+name: Build
+
+# 拉取 sing-box.commit 里固定的 commit 并编译：
+#   * CLI 二进制压缩包：Linux / macOS / Windows
+#   * OpenWrt 安装包：.ipk / .apk
+#
+# 编译前按文件名顺序套用补丁（目录不存在或为空则跳过）：
+#   patches/sing-box/*.patch        -> sing-box 本体（patches/*.patch 仍兼容）
+#   patches/modules/<name>/*.patch  -> 依赖的 Go 模块（如 sing-ebpf）：
+#                                      按 go.mod 的 require/replace 找到仓库与
+#                                      commit，克隆后打补丁并 go mod edit -replace
+# 具体逻辑见 .github/scripts/apply-patches.sh。
+#
+# 改编自 sing-box 官方 .github/workflows/build.yml，去掉了 Android/iOS/macOS
+# 客户端、桌面客户端、deb/rpm/pacman 打包以及 cronet(naive) 工具链。
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号覆盖（留空则按固定 commit 的 git tag 推导）"
+        required: false
+        default: ""
+      extra_tags:
+        description: "额外 Go 编译标签，逗号分隔"
+        required: false
+        default: ""
+      with_ebpf:
+        description: "Linux 构建追加 with_ebpf 标签"
+        type: boolean
+        default: true
+      release:
+        description: "构建完成后创建 draft release"
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      repository: ${{ steps.pin.outputs.repository }}
+      commit: ${{ steps.pin.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read sing-box.commit
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          # tr -d '\r' 防止在 Windows 上编辑过该文件后带进 CRLF
+          source <(tr -d '\r' < ./sing-box.commit)
+          set +a
+          for name in SING_BOX_REPOSITORY SING_BOX_COMMIT; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::sing-box.commit is missing ${name}"
+              exit 1
+            fi
+          done
+          if ! [[ "${SING_BOX_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::SING_BOX_COMMIT must be a full 40-character commit SHA"
+            exit 1
+          fi
+          {
+            echo "repository=${SING_BOX_REPOSITORY}"
+            echo "commit=${SING_BOX_COMMIT}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout sing-box
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.pin.outputs.repository }}
+          ref: ${{ steps.pin.outputs.commit }}
+          path: src
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd src
+          override="${{ inputs.version }}"
+          if [ -n "${override}" ]; then
+            version="${override#v}"
+          else
+            tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+            exact="$(git describe --tags --exact-match 2>/dev/null || true)"
+            if [ -z "${tag}" ]; then
+              version="0.0.0-$(git rev-parse --short HEAD)"
+            elif [ "${exact}" = "${tag}" ]; then
+              version="${tag#v}"
+            else
+              version="${tag#v}-$(git rev-parse --short HEAD)"
+            fi
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "::notice::building ${version}"
+
+  build-linux:
+    name: Linux ${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) }}${{ matrix.go386 && format('_{0}', matrix.go386) }}${{ matrix.gomips && format('_{0}', matrix.gomips) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs:
+      - version
+    defaults:
+      run:
+        working-directory: src
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        include:
+          # goarch 在每行内唯一（产物名由它推导）；openwrt 列列出该二进制要
+          # 额外打成哪些 OpenWrt 架构的安装包。
+          - { goarch: amd64, openwrt: "x86_64" }
+          - { goarch: arm64, openwrt: "aarch64_cortex-a53 aarch64_cortex-a72 aarch64_cortex-a76 aarch64_generic" }
+          - { goarch: "386", go386: sse2, openwrt: "i386_pentium4" }
+          - { goarch: arm, goarm: "7", openwrt: "arm_cortex-a5_vfpv4 arm_cortex-a7_neon-vfpv4 arm_cortex-a7_vfpv4 arm_cortex-a8_vfpv3 arm_cortex-a9_neon arm_cortex-a9_vfpv3-d16 arm_cortex-a15_neon-vfpv4" }
+          - { goarch: riscv64, openwrt: "riscv64_generic" }
+          - { goarch: loong64, openwrt: "loongarch64_generic" }
+          - { goarch: mipsle, gomips: softfloat, openwrt: "mipsel_24kc mipsel_74kc mipsel_mips32" }
+          - { goarch: mipsle, gomips: hardfloat, openwrt: "mipsel_24kc_24kf" }
+          - { goarch: mips, gomips: softfloat, openwrt: "mips_24kc mips_4kec mips_mips32" }
+          - { goarch: mips64, gomips: softfloat, openwrt: "mips64_mips64r2 mips64_octeonplus" }
+          - { goarch: mips64le, gomips: softfloat, openwrt: "mips64el_mips64r2" }
+          - { goarch: mips64le, gomips: hardfloat }
+          - { goarch: "386", go386: softfloat, openwrt: "i386_pentium-mmx" }
+          - { goarch: arm, goarm: "5", openwrt: "arm_arm926ej-s arm_cortex-a7 arm_cortex-a9 arm_fa526 arm_xscale" }
+          - { goarch: arm, goarm: "6", openwrt: "arm_arm1176jzf-s_vfp" }
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Checkout sing-box
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ needs.version.outputs.repository }}
+          ref: ${{ needs.version.outputs.commit }}
+          path: src
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: src/go.mod
+          cache: true
+          cache-dependency-path: src/go.sum
+
+      - name: Apply patches
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash .github/scripts/apply-patches.sh src
+
+      - name: Build
+        run: |
+          set -xeuo pipefail
+          mkdir -p dist
+
+          TAGS="$(cat release/DEFAULT_BUILD_TAGS_OTHERS)"
+          if [ "${{ inputs.with_ebpf }}" != "false" ]; then
+            TAGS="${TAGS},with_ebpf"
+          fi
+          if [ -n "${{ inputs.extra_tags }}" ]; then
+            TAGS="${TAGS},${{ inputs.extra_tags }}"
+          fi
+          echo "BUILD_TAGS=${TAGS}"
+
+          go build -v -trimpath -o dist/sing-box -tags "${TAGS}" \
+            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ needs.version.outputs.version }}' $(cat release/LDFLAGS) -s -w -buildid=" \
+            ./cmd/sing-box
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GO386: ${{ matrix.go386 }}
+          GOARM: ${{ matrix.goarm }}
+          GOMIPS: ${{ matrix.gomips }}
+          GOMIPS64: ${{ matrix.gomips }}
+
+      - name: Set names
+        run: |
+          set -xeuo pipefail
+          VERSION="${{ needs.version.outputs.version }}"
+          DIR_NAME="sing-box-${VERSION}-linux-${{ matrix.goarch }}"
+          if [ -n "${{ matrix.goarm }}" ]; then
+            DIR_NAME="${DIR_NAME}v${{ matrix.goarm }}"
+          elif [ -n "${{ matrix.go386 }}" ] && [ "${{ matrix.go386 }}" != "sse2" ]; then
+            DIR_NAME="${DIR_NAME}-${{ matrix.go386 }}"
+          elif [ -n "${{ matrix.gomips }}" ] && [ "${{ matrix.gomips }}" != "hardfloat" ]; then
+            DIR_NAME="${DIR_NAME}-${{ matrix.gomips }}"
+          fi
+          echo "DIR_NAME=${DIR_NAME}" >> "${GITHUB_ENV}"
+          echo "PKG_VERSION=${VERSION//-/\~}" >> "${GITHUB_ENV}"
+
+      - name: Package OpenWrt ipk
+        if: ${{ matrix.openwrt != '' }}
+        run: |
+          set -xeuo pipefail
+          sudo gem install --no-document fpm
+          cp .fpm_openwrt .fpm
+          fpm -t deb \
+            -v "$PKG_VERSION" \
+            -p "dist/openwrt.deb" \
+            --architecture all \
+            dist/sing-box=/usr/bin/sing-box
+          for architecture in ${{ matrix.openwrt }}; do
+            .github/deb2ipk.sh "$architecture" "dist/openwrt.deb" \
+              "dist/sing-box_${{ needs.version.outputs.version }}_openwrt_${architecture}.ipk"
+          done
+          rm "dist/openwrt.deb"
+
+      - name: Install apk-tools
+        if: ${{ matrix.openwrt != '' }}
+        run: |
+          set -xeuo pipefail
+          docker run --rm -v /usr/local/bin:/mnt alpine:edge \
+            sh -c "apk add --no-cache apk-tools-static && cp /sbin/apk.static /mnt/apk && chmod +x /mnt/apk"
+
+      - name: Package OpenWrt apk
+        if: ${{ matrix.openwrt != '' }}
+        run: |
+          set -xeuo pipefail
+          for architecture in ${{ matrix.openwrt }}; do
+            .github/build_openwrt_apk.sh \
+              "$architecture" \
+              "${{ needs.version.outputs.version }}" \
+              "dist/sing-box" \
+              "dist/sing-box_${{ needs.version.outputs.version }}_openwrt_${architecture}.apk"
+          done
+
+      - name: Archive
+        run: |
+          set -xeuo pipefail
+          cd dist
+          mkdir -p "${DIR_NAME}"
+          cp ../LICENSE "${DIR_NAME}"
+          cp sing-box "${DIR_NAME}"
+          tar -czvf "${DIR_NAME}.tar.gz" "${DIR_NAME}"
+          rm -r "${DIR_NAME}" sing-box
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-linux-${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) }}${{ matrix.go386 && format('_{0}', matrix.go386) }}${{ matrix.gomips && format('_{0}', matrix.gomips) }}
+          path: src/dist
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  build-darwin:
+    name: macOS ${{ matrix.goarch }}
+    runs-on: macos-latest
+    timeout-minutes: 45
+    needs:
+      - version
+    defaults:
+      run:
+        working-directory: src
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goarch: amd64 }
+          - { goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Checkout sing-box
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ needs.version.outputs.repository }}
+          ref: ${{ needs.version.outputs.commit }}
+          path: src
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: src/go.mod
+          cache: true
+          cache-dependency-path: src/go.sum
+
+      - name: Apply patches
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash .github/scripts/apply-patches.sh src
+
+      - name: Build
+        run: |
+          set -xeuo pipefail
+          mkdir -p dist
+          TAGS="$(cat release/DEFAULT_BUILD_TAGS)"
+          if [ -n "${{ inputs.extra_tags }}" ]; then
+            TAGS="${TAGS},${{ inputs.extra_tags }}"
+          fi
+          go build -v -trimpath -o dist/sing-box -tags "${TAGS}" \
+            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ needs.version.outputs.version }}' $(cat release/LDFLAGS) -s -w -buildid=" \
+            ./cmd/sing-box
+        env:
+          CGO_ENABLED: "1"
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+
+      - name: Archive
+        run: |
+          set -xeuo pipefail
+          DIR_NAME="sing-box-${{ needs.version.outputs.version }}-darwin-${{ matrix.goarch }}"
+          cd dist
+          mkdir -p "${DIR_NAME}"
+          cp ../LICENSE "${DIR_NAME}"
+          mv sing-box "${DIR_NAME}"
+          tar -czvf "${DIR_NAME}.tar.gz" "${DIR_NAME}"
+          rm -r "${DIR_NAME}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-darwin-${{ matrix.goarch }}
+          path: src/dist
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  build-windows:
+    name: Windows ${{ matrix.goarch }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    needs:
+      - version
+    defaults:
+      run:
+        working-directory: src
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goarch: amd64 }
+          - { goarch: "386" }
+          - { goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Checkout sing-box
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ needs.version.outputs.repository }}
+          ref: ${{ needs.version.outputs.commit }}
+          path: src
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: src/go.mod
+          cache: true
+          cache-dependency-path: src/go.sum
+
+      - name: Apply patches
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: bash .github/scripts/apply-patches.sh src
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $TAGS = (Get-Content release/DEFAULT_BUILD_TAGS_OTHERS) -join ","
+          if ("${{ inputs.extra_tags }}" -ne "") { $TAGS = "$TAGS,${{ inputs.extra_tags }}" }
+          $LDFLAGS_SHARED = (Get-Content release/LDFLAGS) -join " "
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          go build -v -trimpath -o dist/sing-box.exe -tags "$TAGS" `
+            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ needs.version.outputs.version }}' $LDFLAGS_SHARED -s -w -buildid=" `
+            ./cmd/sing-box
+        env:
+          CGO_ENABLED: "0"
+          GOOS: windows
+          GOARCH: ${{ matrix.goarch }}
+
+      - name: Archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $DIR_NAME = "sing-box-${{ needs.version.outputs.version }}-windows-${{ matrix.goarch }}"
+          New-Item -ItemType Directory -Force -Path "dist/$DIR_NAME" | Out-Null
+          Copy-Item LICENSE "dist/$DIR_NAME"
+          Copy-Item "dist/sing-box.exe" "dist/$DIR_NAME"
+          Compress-Archive -Path "dist/$DIR_NAME" -DestinationPath "dist/$DIR_NAME.zip"
+          Remove-Item -Recurse "dist/$DIR_NAME"
+          Remove-Item "dist/sing-box.exe"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-windows-${{ matrix.goarch }}
+          path: src/dist
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  release:
+    name: Publish release
+    if: ${{ github.event_name == 'push' || inputs.release }}
+    runs-on: ubuntu-latest
+    needs:
+      - version
+      - build-linux
+      - build-darwin
+      - build-windows
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v5
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh dist
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.version.outputs.version) }}
+          name: sing-box ${{ needs.version.outputs.version }}
+          body: |
+            Built from `${{ needs.version.outputs.repository }}` at `${{ needs.version.outputs.commit }}`.
+
+            Version: `${{ needs.version.outputs.version }}`
+          draft: true
+          prerelease: true
+          files: dist/*
+          fail_on_unmatched_files: false
