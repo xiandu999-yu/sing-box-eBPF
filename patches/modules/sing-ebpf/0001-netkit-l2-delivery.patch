@@ -1179,7 +1179,7 @@ index 0000000..8543573
 +	}
 +}
 diff --git a/runtime/tc_isolated_delivery.go b/runtime/tc_isolated_delivery.go
-index 335242f..0278887 100644
+index 335242f..1676351 100644
 --- a/runtime/tc_isolated_delivery.go
 +++ b/runtime/tc_isolated_delivery.go
 @@ -51,7 +51,7 @@ func (d *tcDataPlane) inNamespace(block func() error) error {
@@ -1236,7 +1236,7 @@ index 335242f..0278887 100644
  	if err != nil {
  		return cleanup(err)
  	}
-@@ -113,11 +106,9 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+@@ -113,18 +106,16 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
  		if _, err = owner.configureIsolatedPeer(true); err != nil {
  			return err
  		}
@@ -1251,16 +1251,31 @@ index 335242f..0278887 100644
  		return err
  	})
  	if err != nil {
-@@ -294,7 +285,7 @@ func (d *tcDeliveryLink) healthyIsolated(priority uint16) (bool, error) {
- 	if mac, valid := tcDeliveryMACAddress(d.delivery); !valid || mac != d.deliveryMAC {
+ 		return cleanup(E.Cause(err, "configure TC namespace"))
+ 	}
+ 	mac, valid := tcDeliveryMACAddress(owner.delivery)
+-	if !valid {
++	if !valid && owner.deliveryKind != DeliveryNetkitL3 {
+ 		return cleanup(E.New("invalid TC namespace peer MAC"))
+ 	}
+ 	if err = d.backend.SetDeliveryInterface(uint32(owner.redirect.Attrs().Index), mac); err != nil {
+@@ -291,10 +282,12 @@ func (d *tcDeliveryLink) healthyIsolated(priority uint16) (bool, error) {
+ 	if d.redirect.Attrs().Flags&net.FlagUp == 0 {
  		return false, nil
+ 	}
+-	if mac, valid := tcDeliveryMACAddress(d.delivery); !valid || mac != d.deliveryMAC {
+-		return false, nil
++	if d.deliveryKind != DeliveryNetkitL3 {
++		if mac, valid := tcDeliveryMACAddress(d.delivery); !valid || mac != d.deliveryMAC {
++			return false, nil
++		}
  	}
 -	live, err = tcFilterAttached(d.redirect, netlink.HANDLE_MIN_INGRESS, "sb_tc_return", tcReturnFilterHandle, priority)
 +	live, err = deliveryHookAttached(d.returnLink, d.returnFilter, d.redirect, "sb_tc_return", tcReturnFilterHandle, priority)
  	if err != nil || !live {
  		return false, err
  	}
-@@ -304,7 +295,7 @@ func (d *tcDeliveryLink) healthyIsolated(priority uint16) (bool, error) {
+@@ -304,7 +297,7 @@ func (d *tcDeliveryLink) healthyIsolated(priority uint16) (bool, error) {
  		if err != nil || !live {
  			return err
  		}
@@ -1269,7 +1284,20 @@ index 335242f..0278887 100644
  		return err
  	})
  	return live, err
-@@ -335,22 +326,12 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+@@ -319,10 +312,10 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+ 	// Anything that changes the private end's address after creation leaves
+ 	// the backend addressing frames to a MAC the interface no longer accepts.
+ 	mac, valid := tcDeliveryMACAddress(d.delivery)
+-	if !valid {
++	if !valid && d.deliveryKind != DeliveryNetkitL3 {
+ 		return false, true, nil
+ 	}
+-	if mac != d.deliveryMAC {
++	if valid && mac != d.deliveryMAC {
+ 		if err = backend.SetDeliveryInterface(uint32(d.redirect.Attrs().Index), mac); err != nil {
+ 			return false, false, E.Cause(err, "update TC eBPF delivery address")
+ 		}
+@@ -335,22 +328,12 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
  		}
  		changed = true
  	}
@@ -1298,7 +1326,7 @@ index 335242f..0278887 100644
  	}
  	err = d.namespace.with(func() error {
  		healthy, err := d.configureIsolatedPeer(true)
-@@ -358,17 +339,23 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+@@ -358,17 +341,23 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
  		if err != nil {
  			return err
  		}
