@@ -1,0 +1,8 @@
+# sing-box 源码固定点。
+#
+# 工作流只构建这里记录的 commit；升级时改下面的 SING_BOX_COMMIT 即可，
+# 工作流文件本身不需要改动。SING_BOX_REF 仅作注释用途，便于知道这个
+# commit 来自哪条分支（切换分支时请同时更新）。
+SING_BOX_REPOSITORY=reF1nd/sing-box
+SING_BOX_REF=reF1nd-stable
+SING_BOX_COMMIT=732618a5989cd2566f072c374fe2f619200f33f9
