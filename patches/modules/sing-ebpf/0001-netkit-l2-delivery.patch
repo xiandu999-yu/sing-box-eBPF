@@ -522,6 +522,56 @@ index 03778a4..42d23cb 100644
  			leftBehind = append(leftBehind, name)
  		}
  	}
+diff --git a/runtime/tc_delivery_netkit_test.go b/runtime/tc_delivery_netkit_test.go
+new file mode 100644
+index 0000000..8543573
+--- /dev/null
++++ b/runtime/tc_delivery_netkit_test.go
+@@ -0,0 +1,44 @@
++//go:build with_ebpf && linux && ebpf_integration
++
++package runtime
++
++import (
++	"errors"
++	"os"
++	"testing"
++
++	"golang.org/x/sys/unix"
++)
++
++// TestProbeDeliveryNetkit needs root and a kernel with netkit support (6.7+).
++// It creates and immediately removes a pair in the current namespace.
++func TestProbeDeliveryNetkit(t *testing.T) {
++	if os.Geteuid() != 0 {
++		t.Skip("requires root")
++	}
++	actual, err := ProbeDelivery(DeliveryNetkit)
++	if err != nil {
++		if tcxUnsupportedError(err) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS) {
++			t.Skipf("netkit unavailable on this kernel: %v", err)
++		}
++		t.Fatalf("probe netkit: %v", err)
++	}
++	if actual != DeliveryNetkit {
++		t.Fatalf("created %q, want %q", actual, DeliveryNetkit)
++	}
++}
++
++// TestProbeDeliveryVeth is the baseline: it must work on every supported
++// kernel, so a failure here is a real regression.
++func TestProbeDeliveryVeth(t *testing.T) {
++	if os.Geteuid() != 0 {
++		t.Skip("requires root")
++	}
++	actual, err := ProbeDelivery(DeliveryVeth)
++	if err != nil {
++		t.Fatalf("probe veth: %v", err)
++	}
++	if actual != DeliveryVeth {
++		t.Fatalf("created %q, want %q", actual, DeliveryVeth)
++	}
++}
 diff --git a/runtime/tc_isolated_delivery.go b/runtime/tc_isolated_delivery.go
 index 335242f..0278887 100644
 --- a/runtime/tc_isolated_delivery.go
