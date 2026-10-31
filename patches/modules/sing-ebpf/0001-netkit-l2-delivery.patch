@@ -546,7 +546,7 @@ index 8c4079d..ec95418 100644
  	RequiresRebuild        bool
  }
 diff --git a/internal/core/tc.go b/internal/core/tc.go
-index 3ec9cae..564003b 100644
+index 3ec9cae..56a5cc8 100644
 --- a/internal/core/tc.go
 +++ b/internal/core/tc.go
 @@ -101,6 +101,12 @@ type TCConfig struct {
@@ -604,7 +604,39 @@ index 3ec9cae..564003b 100644
  		selfMapExternal:    config.EnableLocal && config.SelfBypassMap != nil,
  	}
  	// From here, backend owns maps and loadedPrograms: giving up on either of the
-@@ -1111,6 +1128,12 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
+@@ -426,12 +443,17 @@ func loadTCResources(config TCConfig, baseOverrides map[string]mapSpecOverride,
+ 		programIndexes = append(programIndexes, tcProgramSharedIngressEthernet, tcProgramSharedIngressRawIP)
+ 	}
+ 	delivery := "classifier/isolated_delivery"
++	returnSection := "classifier/isolated_return"
++	if config.Delivery == "netkit-l3" {
++		delivery += "_l3"
++		returnSection += "_l3"
++	}
+ 	if !config.EnableTCP {
+ 		delivery += "_udp"
+ 	} else if legacyTCP {
+ 		delivery += "_legacy"
+ 	}
+-	selections = append(selections, programSelection{section: delivery, kernelProgramName: kernelProgramNameTCDelivery}, programSelection{section: "classifier/isolated_return", kernelProgramName: "sb_tc_return"})
++	selections = append(selections, programSelection{section: delivery, kernelProgramName: kernelProgramNameTCDelivery}, programSelection{section: returnSection, kernelProgramName: "sb_tc_return"})
+ 	programIndexes = append(programIndexes, tcProgramDeliveryIngress, tcProgramIsolatedReturn)
+ 	loadedPrograms, err := loadObjectPrograms(loadTC, maps, selections)
+ 	if err != nil {
+@@ -639,7 +661,11 @@ func (b *TCBackend) useDirectTCPListenersLocked() error {
+ 			selections = append(selections, programSelection{section: section, kernelProgramName: name})
+ 		}
+ 	}
+-	add(tcProgramDeliveryIngress, "classifier/isolated_delivery_legacy", kernelProgramNameTCDelivery)
++	deliverySection := "classifier/isolated_delivery_legacy"
++	if b.control.DeliveryMode != 0 {
++		deliverySection = "classifier/isolated_delivery_l3_legacy"
++	}
++	add(tcProgramDeliveryIngress, deliverySection, kernelProgramNameTCDelivery)
+ 	programs, err := loadObjectPrograms(loadTC, b.runtime.maps, selections)
+ 	if err != nil {
+ 		return err
+@@ -1111,6 +1137,12 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
  	}
  }
  
@@ -1179,7 +1211,7 @@ index 0000000..8543573
 +	}
 +}
 diff --git a/runtime/tc_isolated_delivery.go b/runtime/tc_isolated_delivery.go
-index 335242f..1676351 100644
+index 335242f..8195476 100644
 --- a/runtime/tc_isolated_delivery.go
 +++ b/runtime/tc_isolated_delivery.go
 @@ -51,7 +51,7 @@ func (d *tcDataPlane) inNamespace(block func() error) error {
@@ -1202,7 +1234,7 @@ index 335242f..1676351 100644
 -		PeerNamespace:    netlink.NsFd(n.handle),
 -	}
 -	err = netlink.LinkAdd(veth)
-+	created, actualKind, err := createTCDeliveryPair(d.deliveryKind, hostName, peerName, hostAddress, peerAddress, int(n.handle), tcDeliveryMTU)
++	created, actualKind, err := createTCDeliveryPair(d.deliveryKind, hostName, peerName, hostAddress, peerAddress, int(n.handle), deliveryMTU(d.replyMTU))
  	n.access.RUnlock()
  	if err != nil {
 -		return nil, E.Cause(err, "create isolated TC veth (CONFIG_VETH and CAP_NET_ADMIN required)")
@@ -1356,10 +1388,10 @@ index 335242f..1676351 100644
  	}
 diff --git a/runtime/tc_netkit.go b/runtime/tc_netkit.go
 new file mode 100644
-index 0000000..9543c26
+index 0000000..4c8ee89
 --- /dev/null
 +++ b/runtime/tc_netkit.go
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,151 @@
 +//go:build with_ebpf && (linux || android)
 +
 +package runtime
@@ -1388,14 +1420,23 @@ index 0000000..9543c26
 +	netkitModeL2 = 0
 +	netkitModeL3 = 1
 +
-+	// tcDeliveryMTU lets the private stack do TCP segmentation and UDP
-+	// fragmentation, matching the veth pair's MTU.
-+	tcDeliveryMTU = 65535
++	// tcDeliveryMTUMin is the default delivery link MTU; larger interface MTUs
++	// raise it. A 65535 device only confuses tools like LuCI.
++	tcDeliveryMTUMin = 1500
 +)
 +
 +// createTCDeliveryPair creates the host/peer pair used to cross into the
 +// private listener namespace. The returned link is the host end; the caller
 +// re-resolves it by name afterwards.
++// deliveryMTU keeps the pair at a normal Ethernet MTU unless the selected
++// interfaces use larger frames.
++func deliveryMTU(replyMTU int) int {
++	if replyMTU < tcDeliveryMTUMin {
++		return tcDeliveryMTUMin
++	}
++	return replyMTU
++}
++
 +func createTCDeliveryPair(kind, hostName, peerName string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu int) (netlink.Link, string, error) {
 +	switch kind {
 +	case "", DeliveryVeth:
@@ -1453,7 +1494,7 @@ index 0000000..9543c26
 +	if err != nil {
 +		return "", err
 +	}
-+	link, actual, err := createTCDeliveryPair(kind, hostName, peerName, nil, nil, -1, tcDeliveryMTU)
++	link, actual, err := createTCDeliveryPair(kind, hostName, peerName, nil, nil, -1, deliveryMTU(0))
 +	if err == nil && link != nil {
 +		_ = netlink.LinkDel(link)
 +	}
