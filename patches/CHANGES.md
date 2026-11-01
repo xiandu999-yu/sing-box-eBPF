@@ -15,78 +15,54 @@
 
 ### 新增配置
 
-`local` 和 `shared` 各有一份，都是可选字段：
+`delivery` 放在 inbound 顶层，与 `local` / `shared` 平级（两边共用一条交付链路，放下面只会多出“两边必须一致”的约束）；`tcx_*` 仍在 `local` / `shared` 里，各管各的挂载点：
 
-| 字段 | 取值 | 默认 | 说明 |
-| --- | --- | --- | --- |
-| `delivery` | `veth` / `netkit` / `netkit-l3`（实验）/ `auto` | `auto` | socket_assign 的交付链路类型；只在 socket_assign 实际启用时生效。设备名跟随实际建成的类型 |
-| `tcx_position` | `head` / `tail` | `head` | TCX 挂链首还是链尾 |
-| `tcx_priority` | 1–65535 | 未设 | 显式数字，设置后覆盖 `tcx_position` |
+| 字段 | 位置 | 取值 | 默认 | 说明 |
+| --- | --- | --- | --- | --- |
+| `delivery` | 顶层 | `veth` / `netkit` / `netkit-l3`（实验）/ `auto` | `auto` | socket_assign 的交付链路类型；**纯选择器**，没有 socket_assign 时写了也不报错、不生效。设备名跟随实际建成的类型 |
+| `tcx_position` | local / shared | `head` / `tail` | `head` | TCX 挂链首还是链尾 |
+| `tcx_priority` | local / shared | 1–65535 | 未设 | 显式数字，设置后覆盖 `tcx_position` |
 
 `netkit-l3` 是**实验值**：只去掉 MAC/ARP，帧格式与 L2 完全一样，没有性能收益（见第 3 节）。默认不用它，写它也不会报错。
 
 ```json
 {
   "type": "ebpf",
+  "delivery": "auto",
   "local": {
     "enabled": true,
     "data_plane": "socket_assign",
-    "delivery": "auto",
     "tcx_position": "head"
   },
   "shared": {
     "enabled": true,
     "data_plane": "socket_assign",
-    "delivery": "auto",
     "interface": ["eth1", "eth2"],
     "tcx_position": "head"
   }
 }
 ```
 
-### 默认值的推导顺序
+### 取值与生效
 
-1. `local.delivery` 显式设置 → 用它；
-2. 否则 `shared.delivery` 显式设置 → 用它；
-3. 都没设，且 local 或 shared 里有 `enabled: true` + `data_plane: socket_assign` → **`auto`**（优先 netkit，建不出来退回 veth）；
-4. 其余情况（没有 socket_assign、或两个 scope 都关）→ `veth`，此时不会建交付链路。
-
-也就是说默认是 `auto`：内核支持 netkit（≥ 6.7）就用 netkit L2，不支持就退回 veth 并在启动日志里警告，不用改配置。要强制某一种就显式写 `netkit` 或 `veth`。
+- `delivery` 只是选择器：不写 → `auto`；写了但没有任何 scope 用 `socket_assign` → 不建链路、不报错。
+- `auto`：先按 netkit（L2，Linux 6.7+）建，失败退回 veth，并在启动日志里警告 `netkit is unavailable on this kernel`。要强制某一种就写 `netkit` / `veth`。
+- 设备名跟随**实际建成**的类型（`sb-netkit-*` / `sb-veth-*`）。
 
 ### 校验规则
 
-- `delivery: netkit` / `auto` 要求**该 scope 自己** `enabled` 且 `data_plane: socket_assign`，否则启动失败：
-
-  ```
-  local.delivery=netkit requires local.enabled and local.data_plane=socket_assign
-  ```
-
-- 只写 `delivery: veth` 不受此限制，关掉 netkit 不需要额外条件。
-
-- local 与 shared 共用同一条交付链路，两边**都显式设置且不一致**时报错：
-
-  ```
-  local.delivery (netkit) and shared.delivery (veth) differ,
-  but both scopes share one delivery link
-  ```
-
-- `netkit-l3` 已移除，写它报：
-
-  ```
-  delivery: netkit-l3 has been removed, use delivery: netkit (L2) or delivery: auto instead
-  ```
-
+- `delivery` 只校验取值（`veth|netkit|netkit-l3|auto`），**不再校验** scope 的 `enabled` / `data_plane`，也不再要求两边一致——位置改到顶层后这两类错误在结构上就不存在了。
 - `tcx_position` 非法取值报错；两边显式设置且不一致同样报错。
 - `tcx_position: head` 使用显式链首锚点（挂在现有第一个程序之前），**包括没有 priority 标记的程序**；`tail` 挂到链尾；显式 `tcx_priority` 时仍按优先级排序。
-- 只设一边时以设置的为准；都没设时是 `netkit` + `head` + 由位置决定锚点（priority 保持 0）。
-- `inbound_start` 的结构化日志新增 `delivery`（配置值）和 `delivery_used`（实际值）字段，可直接看出最后用的是 netkit 还是 veth。
+- 都没设时是 `auto` + `head` + 由位置决定锚点（priority 保持 0）。
+- `inbound_start` 的结构化日志带 `delivery`（配置值）和 `delivery_used`（实际值），可直接看出最后用的是 netkit 还是 veth。
 
 ### 改动文件
 
 | 文件 | 改动 |
 | --- | --- |
-| `option/ebpf.go` | `EBPFLocalOptions` / `EBPFSharedOptions` 增加 `Delivery`、`TCXPriority`、`TCXPosition`，`delivery` 枚举为 `veth,netkit,auto` |
-| `protocol/ebpf/inbound.go` | 新增 `delivery` / `tcxPriority` / `tcxPosition` 字段；`normalizeDelivery` 保留空值语义、`resolveTCXOrder`；上述校验与默认值推导 |
+| `option/ebpf.go` | `EBPFInboundOptions` 增加 `Delivery`（顶层）；`EBPFLocalOptions` / `EBPFSharedOptions` 增加 `TCXPriority`、`TCXPosition` |
+| `protocol/ebpf/inbound.go` | 新增 `delivery` / `tcxPriority` / `tcxPosition` 字段；`normalizeDelivery`（空值 → `auto`）、`resolveTCXOrder` |
 | `protocol/ebpf/inbound_lifecycle.go` | 把三个值传给 `commonEBPF.TCConfig` |
 
 ---
@@ -173,6 +149,8 @@ tcp.analysis.flags || tcp.flags.reset == 1
 - **握手完成、Application Data 不再回来** → 丢在 `isolated_return`（推头失败或整帧超 MTU，小包过 1460 全丢，正好是"握手成功但页面转圈"）。
 
 `netkit-l3` 现在作为**实验开关**放回来了：它能建、能跑（帧格式和 L2 一样，只是两端 MAC 全零、不开 ARP），但收益是 0 —— 我们本来就不用 ARP。默认仍然走 `auto` → netkit L2。
+
+实测（零 MAC 版）：`delivery: netkit-l3` 下网页正常打开，与 L2 无差别；`ip -d link` 里 `mode l3`、`link/ether 00:00:00:00:00:00`。**结论：能通，但没有理由用。**
 
 ### 「L3 = 裸 IP」是错的
 
