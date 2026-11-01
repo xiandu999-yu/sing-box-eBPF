@@ -19,11 +19,11 @@
 
 | 字段 | 取值 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `delivery` | `veth` / `netkit` / `auto` | `auto` | socket_assign 的交付链路类型；只在 socket_assign 实际启用时生效。设备名跟随实际建成的类型 |
+| `delivery` | `veth` / `netkit` / `netkit-l3`（实验）/ `auto` | `auto` | socket_assign 的交付链路类型；只在 socket_assign 实际启用时生效。设备名跟随实际建成的类型 |
 | `tcx_position` | `head` / `tail` | `head` | TCX 挂链首还是链尾 |
 | `tcx_priority` | 1–65535 | 未设 | 显式数字，设置后覆盖 `tcx_position` |
 
-`netkit-l3` 已从取值里删除，写它会直接启动失败（见下）。
+`netkit-l3` 是**实验值**：只去掉 MAC/ARP，帧格式与 L2 完全一样，没有性能收益（见第 3 节）。默认不用它，写它也不会报错。
 
 ```json
 {
@@ -172,7 +172,19 @@ tcp.analysis.flags || tcp.flags.reset == 1
 - **SYN 反复重传、没有 SYN-ACK** → 丢在 `isolated_delivery`；
 - **握手完成、Application Data 不再回来** → 丢在 `isolated_return`（推头失败或整帧超 MTU，小包过 1460 全丢，正好是"握手成功但页面转圈"）。
 
-这条线索留给以后，当前版本**不提供 L3**：枚举里没有 `netkit-l3`，配置里写它直接报错。
+`netkit-l3` 现在作为**实验开关**放回来了：它能建、能跑（帧格式和 L2 一样，只是两端 MAC 全零、不开 ARP），但收益是 0 —— 我们本来就不用 ARP。默认仍然走 `auto` → netkit L2。
+
+### 「L3 = 裸 IP」是错的
+
+翻驱动源码后可以确认，netkit 的 L3 **不是“裸 IP 帧”**：
+
+- `netkit_setup()` 对两种模式都调 `ether_setup()`，设备始终是以太设备（`hard_header_len = ETH_HLEN`）；
+- L3 只做三件事：不允许设 MAC、`IFF_NOARP` 保持、不做 `eth_hw_addr_random`（MAC 全零）；
+- `netkit_xmit()` 里 `pskb_may_pull(skb, ETH_HLEN)` + `eth_skb_pkt_type()` + `eth_skb_pull_mac()`（后者无条件 `skb_pull_inline(skb, ETH_HLEN)`）——**两种模式线上都是完整以太帧**，剥头发生在对端 rx 侧。
+
+所以：**删掉以太头的 L3 不可能通；保留以太头的 L3 能通，但没有收益。** 我们当时按“L3 = 无以太头”去 `skb_adjust_room(-14)`，等于让 `netkit_xmit` 把 IP 头前 14 字节当 MAC 头吃掉：对端收到从 IP 头中间开始的垃圾、校验和全错、服务端无限重传（正是 `in=377 / eth2_out=34347` 那个形态，而且不会报任何错）。
+
+L3 省下来的只有 MAC/ARP/邻居表；而交付路径里 MAC 是 eBPF 写进去的静态值、ARP 从来不用。所以 L2 是终局，不是妥协——`netkit-l3` 留着只为了以后不用再翻一遍源码。
 
 另外，收口时发现工作区里 `delivery_mode` 对 `netkit` **也**开着 bit1（`bpf_redirect_peer`）——而这个开关当初测过会把 netkit 的 TX 卡死。也就是说“两端都换回 L2 程序也不行”很可能不是 L2 程序的问题，而是这个开关在普通 netkit 上同样生效。本次一并改成恒 0。
 
@@ -181,7 +193,7 @@ tcp.analysis.flags || tcp.flags.reset == 1
 | 文件 | 改动 |
 | --- | --- |
 | `internal/core/tc.go` | `delivery_mode` 恒为 0；删掉空的 `netkit-l3` 分支；clsact 回退固定用 `classifier/isolated_delivery_legacy` |
-| `runtime/tc_netkit.go` | `DeliveryNetkitL3` 分支直接报错；新增 `createTCDeliveryPairWithNames` / `createTCDeliveryPairAuto`；`ProbeDelivery` 走同一条路径，`--probe-delivery auto` 会报出实际建成的那种 |
+| `runtime/tc_netkit.go` | `DeliveryNetkitL3` 恢复为「模式 1 + 不设 MAC」（零 MAC 帧），不再删头；新增 `createTCDeliveryPairWithNames` / `createTCDeliveryPairAuto`；`ProbeDelivery` 走同一条路径，`--probe-delivery auto` 会报出实际建成的那种 |
 | `runtime/tc_delivery.go` | 命名只认具体类型：删掉 `sb-dlv-`，`auto` 在取名前就被解析成 netkit/veth |
 | `runtime/tc_isolated_delivery.go` | 建链时先解析 `auto` 再取名字，`deliveryKind` 记录实际类型 |
 
@@ -193,7 +205,7 @@ tcp.analysis.flags || tcp.flags.reset == 1
 
 ## 已知限制
 
-1. **只做 L2**。L3 需要 raw-IP 的交付/回程程序变体，并且回程要自己补以太头；已验证在 netkit L3 上不通，不再提供（见第 3 节）。
+1. **默认只做 L2**。`netkit-l3` 是实验开关：帧格式与 L2 相同、只是 MAC 全零且不开 ARP，**没有性能收益**，别拿它当优化（见第 3 节）。
 2. **交付链路为 TCX 优先、clsact 回退**。`sb_tc_return` / `sb_tc_deliver` 在支持 TCX 的内核上以 TCX link 挂载，`tcx_priority` / `tcx_position` 对它们同样生效；只有内核不支持 TCX，或无法读取/记录 TCX 顺序（缺权限）时才回退 clsact。
 3. **netkit 需要内核 ≥ 6.7** 并启用 netkit 支持；OpenWrt 24.10（6.6）不支持 netkit，默认的 `auto` 会自动退回 veth（启动日志有 `netkit is unavailable on this kernel` 警告）。
 4. 一个 sing-box 实例仍只能有一个 `local` 接管。
