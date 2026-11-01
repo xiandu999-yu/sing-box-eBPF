@@ -10,6 +10,23 @@ index 7ec6120..a694eee 100644
  	TCDeliveryInterface           string
  	TCNetworkNamespace            string
  	TCDeliveryInterfaceIndex      int
+diff --git a/box.go b/box.go
+index 05a4ece..aaae672 100644
+--- a/box.go
++++ b/box.go
+@@ -125,6 +125,12 @@ func New(options Options) (*Box, error) {
+ 		ctx = context.Background()
+ 	}
+ 	ctx = service.ContextWithDefaultRegistry(ctx)
++	// The eBPF data plane options are process wide: one socket-assignment
++	// delivery link serves every scope, so they come from the root experimental
++	// section instead of the inbound.
++	if options.Experimental.EBPF != nil {
++		ctx = service.ContextWith[option.EBPFExperimentalOptions](ctx, *options.Experimental.EBPF)
++	}
+ 
+ 	endpointRegistry := service.FromContext[adapter.EndpointRegistry](ctx)
+ 	inboundRegistry := service.FromContext[adapter.InboundRegistry](ctx)
 diff --git a/cmd/sing-box/cmd_tools_ebpf.go b/cmd/sing-box/cmd_tools_ebpf.go
 index eadef9e..f0fd6be 100644
 --- a/cmd/sing-box/cmd_tools_ebpf.go
@@ -53,25 +70,25 @@ index eadef9e..f0fd6be 100644
  		Mode:                mode,
  		LocalDataPlane:      commonEBPF.KernelProbeDataPlane(commandEBPFStatusLocal),
 diff --git a/option/ebpf.go b/option/ebpf.go
-index fb2474a..5aa505d 100644
+index fb2474a..2d3e755 100644
 --- a/option/ebpf.go
 +++ b/option/ebpf.go
-@@ -14,6 +14,14 @@ type EBPFInboundOptions struct {
- 	// oversized datagrams. An omitted value keeps fragmentation disabled.
- 	UDPFragment *bool             `json:"udp_fragment,omitempty"`
- 	TCPriority  EBPFTCPriority    `json:"tc_priority,omitempty"`
+@@ -26,13 +26,34 @@ type EBPFInboundOptions struct {
+ 	FakeIPICMP string `json:"fakeip_icmp,omitempty" enum:"off,reply"`
+ }
+ 
++type EBPFExperimentalOptions struct {
 +	// Delivery selects the socket-assignment delivery link type. local and
-+	// shared share one link, so it lives here instead of per scope. It is a
-+	// plain selector: when neither scope uses socket_assign it simply has no
-+	// effect. "auto" (default) prefers a netkit pair in L2 mode (Linux 6.7+)
-+	// and falls back to veth; "netkit"/"veth" pin one kind; "netkit-l3" is
-+	// experimental (no MAC/ARP, same frames, no gain). The device is named
-+	// after the kind that is actually created (sb-netkit-* / sb-veth-*).
-+	Delivery    string            `json:"delivery,omitempty" enum:"veth,netkit,netkit-l3,auto"`
- 	Local       EBPFLocalOptions  `json:"local,omitempty"`
- 	Shared      EBPFSharedOptions `json:"shared,omitempty"`
- 	// FakeIPICMP, when "reply", answers ICMP Echo Request packets addressed to
-@@ -30,9 +38,19 @@ type EBPFLocalOptions struct {
++	// shared share one link, so it is an inbound-level option. It is a plain
++	// selector: when neither scope uses socket_assign it simply has no effect.
++	// "auto" (default) prefers a netkit pair in L2 mode (Linux 6.7+) and falls
++	// back to veth; "netkit"/"veth" pin one kind; "netkit-l3" drops MAC/ARP but
++	// keeps the same frames, so it is not a performance win. The device is
++	// named after the kind that is actually created (sb-netkit-* / sb-veth-*).
++	Delivery string `json:"delivery,omitempty" enum:"veth,netkit,netkit-l3,auto"`
++}
++
+ type EBPFLocalOptions struct {
  	Enabled              *bool                            `json:"enabled,omitempty"`
  	DNSMode              string                           `json:"dns_mode,omitempty" enum:"hijack,respect_policy,off"`
  	DataPlane            string                           `json:"data_plane,omitempty" enum:"cgroup,socket_assign"`
@@ -91,7 +108,7 @@ index fb2474a..5aa505d 100644
  	BypassRuleSet        badoption.Listable[string]       `json:"bypass_rule_set,omitempty" reference:"rule_set"`
  	BypassExclude        badoption.Listable[netip.Prefix] `json:"bypass_exclude,omitempty"`
  	IncludeUID           badoption.Listable[uint32]       `json:"include_uid,omitempty"`
-@@ -50,6 +68,10 @@ type EBPFSharedOptions struct {
+@@ -50,6 +71,10 @@ type EBPFSharedOptions struct {
  	Enabled              *bool                            `json:"enabled,omitempty"`
  	DefaultInterface     bool                             `json:"default_interface,omitempty"`
  	DataPlane            string                           `json:"data_plane,omitempty" enum:"socket_assign,packet_rewrite"`
@@ -102,6 +119,30 @@ index fb2474a..5aa505d 100644
  	DNSMode              string                           `json:"dns_mode,omitempty" enum:"hijack,respect_policy,off"`
  	Interface            badoption.Listable[string]       `json:"interface,omitempty"`
  	IPv6                 *bool                            `json:"ipv6,omitempty"`
+diff --git a/option/experimental.go b/option/experimental.go
+index 7efdfd9..55d7949 100644
+--- a/option/experimental.go
++++ b/option/experimental.go
+@@ -3,12 +3,13 @@ package option
+ import "github.com/sagernet/sing/common/json/badoption"
+ 
+ type ExperimentalOptions struct {
+-	CacheFile           *CacheFileOptions     `json:"cache_file,omitempty"`
+-	ClashAPI            *ClashAPIOptions      `json:"clash_api,omitempty"`
+-	Observability       *ObservabilityOptions `json:"observability,omitempty"`
+-	V2RayAPI            *V2RayAPIOptions      `json:"v2ray_api,omitempty"`
+-	Debug               *DebugOptions         `json:"debug,omitempty"`
+-	URLTestUnifiedDelay bool                  `json:"urltest_unified_delay,omitempty"`
++	CacheFile           *CacheFileOptions        `json:"cache_file,omitempty"`
++	ClashAPI            *ClashAPIOptions         `json:"clash_api,omitempty"`
++	EBPF                *EBPFExperimentalOptions `json:"ebpf,omitempty"`
++	Observability       *ObservabilityOptions    `json:"observability,omitempty"`
++	V2RayAPI            *V2RayAPIOptions         `json:"v2ray_api,omitempty"`
++	Debug               *DebugOptions            `json:"debug,omitempty"`
++	URLTestUnifiedDelay bool                     `json:"urltest_unified_delay,omitempty"`
+ }
+ 
+ type ObservabilityOptions struct {
 diff --git a/protocol/ebpf/diagnostics.go b/protocol/ebpf/diagnostics.go
 index e427125..d435e90 100644
 --- a/protocol/ebpf/diagnostics.go
@@ -149,7 +190,7 @@ index e427125..d435e90 100644
  	}))
  }
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
-index 8c3848f..5596976 100644
+index 8c3848f..b622eff 100644
 --- a/protocol/ebpf/inbound.go
 +++ b/protocol/ebpf/inbound.go
 @@ -29,6 +29,11 @@ const (
@@ -179,11 +220,13 @@ index 8c3848f..5596976 100644
  	networkGeneration         uint64
  	fakeIPIPv4Prefix          netip.Prefix
  	fakeIPIPv6Prefix          netip.Prefix
-@@ -282,6 +291,25 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -282,6 +291,27 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  			return nil, E.New("eBPF self-bypass sockets were not prepared")
  		}
  	}
-+	delivery, err := normalizeDelivery(options.Delivery)
++	// delivery is process wide (one socket-assignment delivery link serves every
++	// scope), so it lives in the root experimental section, not in this inbound.
++	delivery, err := normalizeDelivery(service.FromContext[option.EBPFExperimentalOptions](ctx).Delivery)
 +	if err != nil {
 +		return nil, err
 +	}
@@ -205,7 +248,7 @@ index 8c3848f..5596976 100644
  	inbound := &Inbound{
  		Adapter:        inbound.NewAdapter(C.TypeEBPF, tag),
  		ctx:            ctx,
-@@ -308,10 +336,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -308,10 +338,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  		sharedIPv6:          sharedEnabled && enabledByDefault(options.Shared.IPv6),
  		sharedBypassPrivate: options.Shared.BypassPrivateAddress == nil || *options.Shared.BypassPrivateAddress,
  		localBypassPort:     localBypassPort,
@@ -220,7 +263,7 @@ index 8c3848f..5596976 100644
  		sharedIncludeMAC:    sharedIncludeMAC,
  		sharedExcludeMAC:    sharedExcludeMAC,
  		localPolicy: localUIDPolicy{
-@@ -404,3 +436,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
+@@ -404,3 +438,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
  		break
  	}
  }

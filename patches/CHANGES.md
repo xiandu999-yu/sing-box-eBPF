@@ -15,11 +15,11 @@
 
 ### 新增配置
 
-`delivery` 放在 inbound 顶层，与 `local` / `shared` 平级（两边共用一条交付链路，放下面只会多出“两边必须一致”的约束）；`tcx_*` 仍在 `local` / `shared` 里，各管各的挂载点：
+`delivery` 放在**根级** `experimental.ebpf` 下：整个进程只有一条 socket_assign 交付链路，它不属于任何一个 inbound；`tcx_*` 仍在 `local` / `shared` 里，各管各的挂载点：
 
 | 字段 | 位置 | 取值 | 默认 | 说明 |
 | --- | --- | --- | --- | --- |
-| `delivery` | 顶层 | `veth` / `netkit` / `netkit-l3`（实验）/ `auto` | `auto` | socket_assign 的交付链路类型；**纯选择器**，没有 socket_assign 时写了也不报错、不生效。设备名跟随实际建成的类型 |
+| `delivery` | `experimental.ebpf` | `veth` / `netkit` / `netkit-l3`（实验）/ `auto` | `auto` | socket_assign 的交付链路类型；**纯选择器**，没有 socket_assign 时写了也不报错、不生效。设备名跟随实际建成的类型 |
 | `tcx_position` | local / shared | `head` / `tail` | `head` | TCX 挂链首还是链尾 |
 | `tcx_priority` | local / shared | 1–65535 | 未设 | 显式数字，设置后覆盖 `tcx_position` |
 
@@ -27,19 +27,25 @@
 
 ```json
 {
-  "type": "ebpf",
-  "delivery": "auto",
-  "local": {
-    "enabled": true,
-    "data_plane": "socket_assign",
-    "tcx_position": "head"
+  "experimental": {
+    "ebpf": { "delivery": "auto" }
   },
-  "shared": {
-    "enabled": true,
-    "data_plane": "socket_assign",
-    "interface": ["eth1", "eth2"],
-    "tcx_position": "head"
-  }
+  "inbounds": [
+    {
+      "type": "ebpf",
+      "local": {
+        "enabled": true,
+        "data_plane": "socket_assign",
+        "tcx_position": "head"
+      },
+      "shared": {
+        "enabled": true,
+        "data_plane": "socket_assign",
+        "interface": ["eth1", "eth2"],
+        "tcx_position": "head"
+      }
+    }
+  ]
 }
 ```
 
