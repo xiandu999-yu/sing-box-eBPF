@@ -189,9 +189,13 @@ jobs:
           set -euo pipefail
           box=$(find patches/sing-box -name '*.patch' 2>/dev/null | wc -l)
           mod=$(find patches/modules -name '*.patch' 2>/dev/null | wc -l)
-          echo "sing-box patches: ${box}, module patches: ${mod}"
+          pins=$(find patches/modules -name 'pin.env' 2>/dev/null | wc -l)
+          echo "sing-box patches: ${box}, module patches: ${mod}, module pins: ${pins}"
           [ "${box}" -gt 0 ] || { echo "::error::no sing-box patch found under patches/sing-box"; exit 1; }
-          [ "${mod}" -gt 0 ] || { echo "::error::no module patch found under patches/modules"; exit 1; }
+          if [ "${mod}" -eq 0 ] && [ "${pins}" -eq 0 ]; then
+            echo "::error::no module patch and no module pin under patches/modules"
+            exit 1
+          fi
 
       - name: Apply patches
         shell: bash

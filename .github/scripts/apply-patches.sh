@@ -83,10 +83,12 @@ lookup_module() {
 if [ -d "$ROOT/patches/modules" ]; then
 	for dir in "$ROOT"/patches/modules/*/; do
 		name="$(basename "$dir")"
-		files=("$dir"*.patch)
+		files=()
+		while IFS= read -r patch_file; do
+			files+=("$patch_file")
+		done < <(find "$dir" -maxdepth 1 -type f -name '*.patch' | sort)
 		if [ ${#files[@]} -eq 0 ]; then
-			echo "modules/$name: no patches, skipped"
-			continue
+			echo "modules/$name: no patch files, clone-only (pin.env carries the changes)"
 		fi
 
 		MODULE_PATH=""
