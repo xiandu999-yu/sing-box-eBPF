@@ -190,7 +190,7 @@ index e427125..d435e90 100644
  	}))
  }
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
-index 8c3848f..365418d 100644
+index 8c3848f..c3fece8 100644
 --- a/protocol/ebpf/inbound.go
 +++ b/protocol/ebpf/inbound.go
 @@ -29,6 +29,11 @@ const (
@@ -220,7 +220,7 @@ index 8c3848f..365418d 100644
  	networkGeneration         uint64
  	fakeIPIPv4Prefix          netip.Prefix
  	fakeIPIPv6Prefix          netip.Prefix
-@@ -282,6 +291,29 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -282,6 +291,24 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  			return nil, E.New("eBPF self-bypass sockets were not prepared")
  		}
  	}
@@ -235,14 +235,9 @@ index 8c3848f..365418d 100644
 +		// to veth. With no socket_assign scope it is simply never used.
 +		delivery = deliveryAuto
 +	}
-+	// bypass_process only exists in the cgroup data plane. A disabled local scope
-+	// simply never intercepts anything, so the list is inert there and must not
-+	// fail startup; socket_assign would silently ignore it, which is the trap.
-+	if len(options.Local.BypassProcess) > 0 && localEnabled && localDataPlane != localDataPlaneCgroup {
-+		return nil, E.New("local.bypass_process requires local.data_plane=cgroup: ",
-+			"the calling process is only visible in the cgroup connect/sendmsg hook, ",
-+			"which socket_assign does not attach")
-+	}
++	// bypass_process works in both data planes: cgroup decides inside the hook,
++	// socket_assign gets a marker-only cgroup hook that flags the socket so TC
++	// skips it. Nothing to validate here.
 +	tcxPriority, tcxPosition, err := resolveTCXOrder(options)
 +	if err != nil {
 +		return nil, err
@@ -250,7 +245,7 @@ index 8c3848f..365418d 100644
  	inbound := &Inbound{
  		Adapter:        inbound.NewAdapter(C.TypeEBPF, tag),
  		ctx:            ctx,
-@@ -308,10 +340,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -308,10 +335,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  		sharedIPv6:          sharedEnabled && enabledByDefault(options.Shared.IPv6),
  		sharedBypassPrivate: options.Shared.BypassPrivateAddress == nil || *options.Shared.BypassPrivateAddress,
  		localBypassPort:     localBypassPort,
@@ -265,7 +260,7 @@ index 8c3848f..365418d 100644
  		sharedIncludeMAC:    sharedIncludeMAC,
  		sharedExcludeMAC:    sharedExcludeMAC,
  		localPolicy: localUIDPolicy{
-@@ -404,3 +440,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
+@@ -404,3 +435,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
  		break
  	}
  }
@@ -321,10 +316,35 @@ index 8c3848f..365418d 100644
 +	return priority, position, nil
 +}
 diff --git a/protocol/ebpf/inbound_lifecycle.go b/protocol/ebpf/inbound_lifecycle.go
-index d7fadb9..d1ac9dd 100644
+index d7fadb9..71b0965 100644
 --- a/protocol/ebpf/inbound_lifecycle.go
 +++ b/protocol/ebpf/inbound_lifecycle.go
-@@ -116,6 +116,9 @@ func (i *Inbound) startInbound() error {
+@@ -91,6 +91,11 @@ func (i *Inbound) startInbound() error {
+ 		if err := i.listeners.start(i.enableTCP, i.enableUDP, true, i.localIPv6, i.newListener); err != nil {
+ 			return err
+ 		}
++	}
++	// socket_assign keeps the data plane in TC, but bypass_process still needs
++	// the cgroup hooks: only they run in the calling process, and the decision
++	// travels to TC as socket metadata.
++	if i.localCgroupEnabled() || (i.localEnabled && len(i.localBypassProcess) > 0) {
+ 		if err := i.prepareCgroupBackend(); err != nil {
+ 			return err
+ 		}
+@@ -98,7 +103,11 @@ func (i *Inbound) startInbound() error {
+ 		if err := cgroupBackend.UpdateHostAddresses(hostAddresses); err != nil {
+ 			return E.Cause(err, "initialize cgroup eBPF host address policy")
+ 		}
+-		if err := cgroupBackend.LoadPrograms(i.listeners.selectedPort()); err != nil {
++		listenerPort := uint16(0)
++		if i.localCgroupEnabled() {
++			listenerPort = i.listeners.selectedPort()
++		}
++		if err := cgroupBackend.LoadPrograms(listenerPort); err != nil {
+ 			return err
+ 		}
+ 	}
+@@ -116,6 +125,9 @@ func (i *Inbound) startInbound() error {
  		EnableSharedIPv6: sharedSocketAssignEnabled && i.sharedIPv6,
  		EnableTCP:        i.enableTCP,
  		EnableUDP:        i.enableUDP,
@@ -334,7 +354,7 @@ index d7fadb9..d1ac9dd 100644
  		Policy:           i.compiledPolicy,
  		SelfBypass:       i.selfBypass,
  		TrackProcess:     i.processTracker != nil,
-@@ -625,8 +628,9 @@ func (i *Inbound) prepareCgroupBackend() error {
+@@ -625,8 +637,10 @@ func (i *Inbound) prepareCgroupBackend() error {
  		RedirectIPv6: i.redirectIPv6Prefix,
  		MapCapacity:  mapCapacity,
  		UDPTimeout:   i.udpTimeout,
@@ -342,6 +362,7 @@ index d7fadb9..d1ac9dd 100644
 -		SelfBypass:   i.selfBypass,
 +		Policy:        i.compiledPolicy,
 +		BypassProcess: i.localBypassProcess,
++		MarkerOnly:    !i.localCgroupEnabled(),
 +		SelfBypass:    i.selfBypass,
  	})
  	if err != nil {
