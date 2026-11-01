@@ -132,20 +132,36 @@ if [ -d "$ROOT/patches/modules" ]; then
 			*) repo_url="https://$repo" ;;
 		esac
 
-		module_dir="$ROOT/modules/$name"
-		echo "::group::clone $repo_url@$ref"
-		rm -rf "$module_dir"
-		# 不要 blob 的克隆：既省流量，又能把分支/tag/缩写 SHA 统一解析成完整 SHA
-		git clone -q --filter=blob:none --no-checkout "$repo_url" "$module_dir"
-		full_sha="$(git -C "$module_dir" rev-parse --verify "${ref}^{commit}")"
-		git -C "$module_dir" checkout -q --detach "$full_sha"
-		echo "::endgroup::"
+		if [ ${#files[@]} -gt 0 ]; then
+			module_dir="$ROOT/modules/$name"
+			echo "::group::clone $repo_url@$ref"
+			rm -rf "$module_dir"
+			# 不要 blob 的克隆：既省流量，又能把分支/tag/缩写 SHA 统一解析成完整 SHA
+			git clone -q --filter=blob:none --no-checkout "$repo_url" "$module_dir"
+			full_sha="$(git -C "$module_dir" rev-parse --verify "${ref}^{commit}")"
+			git -C "$module_dir" checkout -q --detach "$full_sha"
+			echo "::endgroup::"
 
-		apply_patches "$module_dir" "$name" "${files[@]}"
+			apply_patches "$module_dir" "$name" "${files[@]}"
 
-		# 用相对路径：prepare 阶段打包后会在另一个 runner 上解压，绝对路径会失效
-  module_rel="$(realpath --relative-to="$SRC_ABS" "$module_dir")"
-  ( cd "$SRC_ABS" && go mod edit -replace "$module_path=$module_rel" )
-		echo "replaced $module_path => $module_dir ($full_sha)"
+			# 用相对路径：prepare 阶段打包后会在另一个 runner 上解压，绝对路径会失效
+			module_rel="$(realpath --relative-to="$SRC_ABS" "$module_dir")"
+			( cd "$SRC_ABS" && go mod edit -replace "$module_path=$module_rel" )
+			echo "replaced $module_path => $module_dir ($full_sha)"
+		else
+			# 没有补丁：直接把 go.mod 指向 fork，不克隆、不生成对象。
+			# 对象已经提交在 fork 里，构建时直接从模块代理取。
+			fork_path="${repo_url#https://}"
+			fork_path="${fork_path#http://}"
+			echo "::group::pin $module_path => ${fork_path}@${ref}"
+			(
+				cd "$SRC_ABS"
+				GOFLAGS=-mod=mod go get "${fork_path}@${ref}"
+				version="$(go list -m -f '{{.Version}}' "$fork_path")"
+				go mod edit -replace "${module_path}=${fork_path}@${version}"
+				echo "replaced $module_path => ${fork_path}@${version}"
+			)
+			echo "::endgroup::"
+		fi
 	done
 fi

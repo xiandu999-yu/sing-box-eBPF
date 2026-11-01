@@ -175,13 +175,6 @@ jobs:
           cache: true
           cache-dependency-path: src/go.sum
 
-      - name: Setup Android NDK
-        id: setup-ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r29
-          add-to-path: false
-
       # 防止补丁放错目录时静默跳过，导致用原版代码构建
       - name: Verify patches present
         shell: bash
@@ -203,32 +196,11 @@ jobs:
           sed -i 's/\r$//' .github/scripts/apply-patches.sh
           bash .github/scripts/apply-patches.sh src
 
-      - name: Generate BPF objects
-        working-directory: ${{ github.workspace }}/modules/sing-ebpf
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: |
-          set -euo pipefail
-          before=$(sha256sum internal/bpfgen/tc_bpfel.o | cut -d' ' -f1)
-          echo "before: ${before}"
-          make generate
-          after=$(sha256sum internal/bpfgen/tc_bpfel.o | cut -d' ' -f1)
-          echo "after:  ${after}"
-          echo "--- bpfgen status (may be empty when generation is a no-op)"
-          git status --short -- internal/bpfgen || true
-          native_changed="$(git diff --name-only -- native | head -n 1 || true)"
-          if [ -z "${native_changed}" ]; then
-            echo "native sources unchanged: generation no-op is expected"
-          elif [ "${before}" = "${after}" ]; then
-            echo "::error::native sources changed but tc_bpfel.o did not; generation is ineffective"
-            exit 1
-          fi
-
       - name: Pack prepared source
         shell: bash
         run: |
           set -euo pipefail
-          tar -czf prepared-src.tgz src modules
+          tar -czf prepared-src.tgz src
           ls -lh prepared-src.tgz
 
       - name: Upload prepared source
@@ -322,33 +294,14 @@ jobs:
           cache: true
           cache-dependency-path: src/go.sum
 
-      # 构建前自证：打印实际使用的模块目录与对象哈希，
-      # 避免「补丁/对象没进产物」这类问题再次静默发生。
-      - name: Verify prepared objects
+      # 构建前打印模块 pin，确认用的是 fork 的那个 commit
+      - name: Show module pin
         run: |
           set -euo pipefail
-          echo "go.mod replace:"
           grep -n 'CHIZI-0618/sing-ebpf' go.mod || true
-          module_dir="$(go list -m -f '{{.Dir}}' github.com/CHIZI-0618/sing-ebpf)"
-          echo "module dir: ${module_dir}"
-          object="${module_dir}/internal/bpfgen/tc_bpfel.o"
-          ls -l "${object}"
-          sha256sum "${object}"
-          case "$(sha256sum "${object}" | cut -d' ' -f1)" in
-            # 上游模块自带的原始对象：出现它说明补丁/生成完全没生效
-            1c00f14a*) echo "::error::build resolved the upstream bpfgen object (patches not applied)"; exit 1 ;;
-            *) echo "object differs from upstream: patched objects are in use" ;;
-          esac
-          # 再问 Go 一次：编译时实际使用的 bpfgen 包目录在哪、内容是什么
-          # 注意 bpfgen 的源文件带 with_ebpf 约束，查询时必须带上同样的 tags
-          pkg_dir="$(go list -tags with_ebpf -f '{{.Dir}}' github.com/CHIZI-0618/sing-ebpf/internal/bpfgen)"
-          echo "bpfgen package dir: ${pkg_dir}"
-          ls -l "${pkg_dir}"
-          sha256sum "${pkg_dir}"/tc_bpfel.go "${pkg_dir}"/tc_bpfel.o
-
-      # 排除 Go 构建缓存导致的「输入新、产物旧」
-      - name: Clean Go build cache
-        run: go clean -cache
+          go mod download github.com/CHIZI-0618/sing-ebpf
+          go list -m -f '{{.Path}} {{.Version}}' github.com/CHIZI-0618/sing-ebpf
+          go clean -cache
 
       - name: Build
         run: |
