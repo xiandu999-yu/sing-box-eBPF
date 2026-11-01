@@ -181,6 +181,33 @@ L3 省下来的只有 MAC/ARP/邻居表；而交付路径里 MAC 是 eBPF 写进
 
 ---
 
+## 4. local：按进程名旁路（`bypass_process`）
+
+只在 `local.data_plane: cgroup` 下有效。`cgroup/connect4|6`、`cgroup/sendmsg4|6` 运行在**发起系统调用的那个线程的上下文**里，所以 `bpf_get_current_comm()` 返回的就是发起连接的进程名（内核 `task->comm`，可执行文件 basename，截断 15 字节），不需要扫 `/proc`，也没有 pid→名字映射表的竞态。
+
+判定插在 `handle_v4/6` 里 `is_cookie_bypassed()` 之后、**所有选择器之前**（包括 DNS 劫持），命中即 `return 1`，不改写目标地址：
+
+```json
+{
+  "local": {
+    "enabled": true,
+    "data_plane": "cgroup",
+    "bypass_process": ["aria2c", "transmission-da"]
+  }
+}
+```
+
+- **前缀匹配**（LPM trie，按 bit 前缀）：`transmission-da` 能命中 `transmission-daemon` 被截断后的名字。
+- 名字超过 15 字节在启动时直接报错，不会静默不匹配；非 ASCII 同样报错。
+- 与 `bypass_port` / `bypass_private_address` / `exclude_uid` 独立，命中任何一条旁路即可。
+- 在 `socket_assign` 下配置它会**启动失败**：TC 上下文里 `bpf_get_current_comm()` 拿到的是软中断，判不了进程。
+
+实现：新增 LPM 表 `cgroup_process_bypass`（内核名 `sb_cg_pname`，256 条），`handle_v4/6` 多一次 comm 拷贝 + 一次查表；控制位 `SB_EBPF_CGROUP_FLAG_PROCESS_BYPASS (1U << 19U)` 未置位时这段完全不执行，零开销。
+
+**这一节改动了 C 与 map，必须重新生成 `internal/bpfgen/*.o`（`make generate`）。**
+
+---
+
 ## 已知限制
 
 1. **默认只做 L2**。`netkit-l3` 是实验开关：帧格式与 L2 相同、只是 MAC 全零且不开 ARP，**没有性能收益**，别拿它当优化（见第 3 节）。
