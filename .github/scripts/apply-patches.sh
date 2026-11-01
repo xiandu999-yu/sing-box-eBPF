@@ -156,9 +156,16 @@ if [ -d "$ROOT/patches/modules" ]; then
 			echo "::group::pin $module_path => ${fork_path}@${ref}"
 			(
 				cd "$SRC_ABS"
-				GOFLAGS=-mod=mod go get "${fork_path}@${ref}"
-				version="$(go list -m -f '{{.Version}}' "$fork_path")"
+				# fork 的 go.mod 仍声明原模块路径，所以不能 `go get <fork>`；
+				# 先用代理把 commit 解析成伪版本，再写 replace。
+				version="$(curl -fsSL "https://proxy.golang.org/${fork_path}/@v/${ref}.info" 2>/dev/null \
+					| sed -n 's/.*"Version":"\([^"]*\)".*/\1/p')"
+				if [ -z "$version" ]; then
+					echo "::error::cannot resolve ${fork_path}@${ref} through the Go module proxy"
+					exit 1
+				fi
 				go mod edit -replace "${module_path}=${fork_path}@${version}"
+				GOFLAGS=-mod=mod go mod download "${module_path}" || true
 				echo "replaced $module_path => ${fork_path}@${version}"
 			)
 			echo "::endgroup::"
