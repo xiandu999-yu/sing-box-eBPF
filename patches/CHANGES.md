@@ -210,6 +210,8 @@ L3 省下来的只有 MAC/ARP/邻居表；而交付路径里 MAC 是 eBPF 写进
 
 实现：新增 LPM 表 `cgroup_process_bypass`（内核名 `sb_cg_pname`，256 条），`handle_v4/6` 多一次 comm 拷贝 + 一次查表；控制位 `SB_EBPF_CGROUP_FLAG_PROCESS_BYPASS (1U << 19U)` 未置位时这段完全不执行，零开销。
 
+另有一道**自身早退**：控制块新增 `owner_tgid`（结构体 32 → 36 字节），`handle_v4/6` 第一行比较 `bpf_get_current_pid_tgid() >> 32 == owner_tgid`，相等就直接 `return 1`。这是给 sing-box 自己的 dialer 用的——它的连接永远不该被改写回自己的监听。相比原来的 socket 元数据表（cgroup `sock_create` 打标）它不依赖任何 cgroup 子钩子，也不依赖用户态注册；`owner_tgid = 0`（进程不在初始 PID namespace）时自动关闭，退回元数据表。
+
 **这一节改动了 C 与 map，必须重新生成 `internal/bpfgen/*.o`（`make generate`）。**
 
 ---
