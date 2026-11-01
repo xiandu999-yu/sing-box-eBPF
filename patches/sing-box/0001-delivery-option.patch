@@ -69,6 +69,63 @@ index eadef9e..f0fd6be 100644
  	report, err := commonEBPF.ProbeKernel(commonEBPF.KernelProbeOptions{
  		Mode:                mode,
  		LocalDataPlane:      commonEBPF.KernelProbeDataPlane(commandEBPFStatusLocal),
+diff --git a/experimental/clashapi/connections.go b/experimental/clashapi/connections.go
+index e3c8f2d..9ccaf5b 100644
+--- a/experimental/clashapi/connections.go
++++ b/experimental/clashapi/connections.go
+@@ -5,6 +5,7 @@ import (
+ 	"context"
+ 	"net/http"
+ 	"net/netip"
++	"path/filepath"
+ 	"strconv"
+ 	"time"
+ 
+@@ -66,21 +67,25 @@ func (c connectionObject) MarshalJSON() ([]byte, error) {
+ 	} else {
+ 		destinationAddr = c.Metadata.Destination.Addr
+ 	}
++	// Dashboards such as zashboard and metacubexd render metadata.process as the
++	// bare name and metadata.processPath as the path, matching mihomo. Keep them
++	// separate: gluing the user name onto the path used to leak into the name.
++	var processName string
+ 	var processPath string
++	processUID := int32(-1)
+ 	if c.Metadata.ProcessInfo != nil {
+-		if c.Metadata.ProcessInfo.ProcessPath != "" {
++		switch {
++		case c.Metadata.ProcessInfo.ProcessPath != "":
+ 			processPath = c.Metadata.ProcessInfo.ProcessPath
+-		} else if len(c.Metadata.ProcessInfo.AndroidPackageNames) > 0 {
++		case len(c.Metadata.ProcessInfo.AndroidPackageNames) > 0:
+ 			processPath = c.Metadata.ProcessInfo.AndroidPackageNames[0]
+ 		}
+-		if processPath == "" {
+-			if c.Metadata.ProcessInfo.UserId != -1 {
+-				processPath = F.ToString(c.Metadata.ProcessInfo.UserId)
++		processUID = c.Metadata.ProcessInfo.UserId
++		if processPath != "" {
++			processName = filepath.Base(processPath)
++			if processName == "." || processName == string(filepath.Separator) {
++				processName = processPath
+ 			}
+-		} else if c.Metadata.ProcessInfo.UserName != "" {
+-			processPath = F.ToString(processPath, " (", c.Metadata.ProcessInfo.UserName, ")")
+-		} else if c.Metadata.ProcessInfo.UserId != -1 {
+-			processPath = F.ToString(processPath, " (", c.Metadata.ProcessInfo.UserId, ")")
+ 		}
+ 	}
+ 	var rule string
+@@ -101,7 +106,9 @@ func (c connectionObject) MarshalJSON() ([]byte, error) {
+ 			"host":            domain,
+ 			"sniffHost":       c.Metadata.SniffHost,
+ 			"dnsMode":         "normal",
++			"process":         processName,
+ 			"processPath":     processPath,
++			"uid":             processUID,
+ 		},
+ 		"upload":      c.Upload.Load(),
+ 		"download":    c.Download.Load(),
 diff --git a/option/ebpf.go b/option/ebpf.go
 index fb2474a..2d3e755 100644
 --- a/option/ebpf.go
@@ -190,7 +247,7 @@ index e427125..d435e90 100644
  	}))
  }
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
-index 8c3848f..c3fece8 100644
+index 8c3848f..44f5c4b 100644
 --- a/protocol/ebpf/inbound.go
 +++ b/protocol/ebpf/inbound.go
 @@ -29,6 +29,11 @@ const (
@@ -205,7 +262,15 @@ index 8c3848f..c3fece8 100644
  )
  
  var (
-@@ -100,10 +105,14 @@ type Inbound struct {
+@@ -67,6 +72,7 @@ type Inbound struct {
+ 	localDataPlane            string
+ 	cgroupPath                string
+ 	cgroupBackend             *commonEBPF.CgroupBackend
++	processMarkers            *commonEBPF.MarkerBackend
+ 	localRoutes               *commonEBPF.LocalRouteSet
+ 	redirectIPv4Prefix        netip.Prefix
+ 	redirectIPv6Prefix        netip.Prefix
+@@ -100,10 +106,14 @@ type Inbound struct {
  	sharedIPv6                bool
  	sharedBypassPrivate       bool
  	localBypassPort           []portRange
@@ -220,7 +285,7 @@ index 8c3848f..c3fece8 100644
  	networkGeneration         uint64
  	fakeIPIPv4Prefix          netip.Prefix
  	fakeIPIPv6Prefix          netip.Prefix
-@@ -282,6 +291,24 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -282,6 +292,24 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  			return nil, E.New("eBPF self-bypass sockets were not prepared")
  		}
  	}
@@ -245,7 +310,7 @@ index 8c3848f..c3fece8 100644
  	inbound := &Inbound{
  		Adapter:        inbound.NewAdapter(C.TypeEBPF, tag),
  		ctx:            ctx,
-@@ -308,10 +335,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -308,10 +336,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  		sharedIPv6:          sharedEnabled && enabledByDefault(options.Shared.IPv6),
  		sharedBypassPrivate: options.Shared.BypassPrivateAddress == nil || *options.Shared.BypassPrivateAddress,
  		localBypassPort:     localBypassPort,
@@ -260,7 +325,7 @@ index 8c3848f..c3fece8 100644
  		sharedIncludeMAC:    sharedIncludeMAC,
  		sharedExcludeMAC:    sharedExcludeMAC,
  		localPolicy: localUIDPolicy{
-@@ -404,3 +435,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
+@@ -404,3 +436,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
  		break
  	}
  }
@@ -316,35 +381,24 @@ index 8c3848f..c3fece8 100644
 +	return priority, position, nil
 +}
 diff --git a/protocol/ebpf/inbound_lifecycle.go b/protocol/ebpf/inbound_lifecycle.go
-index d7fadb9..71b0965 100644
+index d7fadb9..9e5579f 100644
 --- a/protocol/ebpf/inbound_lifecycle.go
 +++ b/protocol/ebpf/inbound_lifecycle.go
-@@ -91,6 +91,11 @@ func (i *Inbound) startInbound() error {
- 		if err := i.listeners.start(i.enableTCP, i.enableUDP, true, i.localIPv6, i.newListener); err != nil {
+@@ -101,6 +101,13 @@ func (i *Inbound) startInbound() error {
+ 		if err := cgroupBackend.LoadPrograms(i.listeners.selectedPort()); err != nil {
  			return err
  		}
-+	}
-+	// socket_assign keeps the data plane in TC, but bypass_process still needs
-+	// the cgroup hooks: only they run in the calling process, and the decision
-+	// travels to TC as socket metadata.
-+	if i.localCgroupEnabled() || (i.localEnabled && len(i.localBypassProcess) > 0) {
- 		if err := i.prepareCgroupBackend(); err != nil {
- 			return err
- 		}
-@@ -98,7 +103,11 @@ func (i *Inbound) startInbound() error {
- 		if err := cgroupBackend.UpdateHostAddresses(hostAddresses); err != nil {
- 			return E.Cause(err, "initialize cgroup eBPF host address policy")
- 		}
--		if err := cgroupBackend.LoadPrograms(i.listeners.selectedPort()); err != nil {
-+		listenerPort := uint16(0)
-+		if i.localCgroupEnabled() {
-+			listenerPort = i.listeners.selectedPort()
++	} else if i.localEnabled && len(i.localBypassProcess) > 0 {
++		// socket_assign keeps the data plane in TC. Only the cgroup hooks run in
++		// the calling process, so attach the minimal markers that flag the
++		// excluded processes' sockets for TC.
++		if err := i.startProcessMarkers(); err != nil {
++			return err
 +		}
-+		if err := cgroupBackend.LoadPrograms(listenerPort); err != nil {
- 			return err
- 		}
  	}
-@@ -116,6 +125,9 @@ func (i *Inbound) startInbound() error {
+ 	if i.localCgroupEnabled() || sharedRewriteEnabled {
+ 		if err := i.setupLocalRoutes(); err != nil {
+@@ -116,6 +123,9 @@ func (i *Inbound) startInbound() error {
  		EnableSharedIPv6: sharedSocketAssignEnabled && i.sharedIPv6,
  		EnableTCP:        i.enableTCP,
  		EnableUDP:        i.enableUDP,
@@ -354,7 +408,44 @@ index d7fadb9..71b0965 100644
  		Policy:           i.compiledPolicy,
  		SelfBypass:       i.selfBypass,
  		TrackProcess:     i.processTracker != nil,
-@@ -625,8 +637,10 @@ func (i *Inbound) prepareCgroupBackend() error {
+@@ -515,6 +525,7 @@ func (i *Inbound) closeResources() error {
+ 	i.stopTCAssignmentJanitor()
+ 	monitorErr := i.stopTCInterfaceMonitor()
+ 	i.stopBypassRuleSets()
++	_ = i.closeProcessMarkers()
+ 	sharedRewriteErr := error(nil)
+ 	if shared := i.takeSharedRewrite(); shared != nil {
+ 		sharedRewriteErr = shared.Close()
+@@ -608,6 +619,28 @@ func closeProcessTrackerOwner(tracker processTrackerOwner) (processTrackerOwner,
+ 	return tracker, closeErr
+ }
+ 
++func (i *Inbound) startProcessMarkers() error {
++	markers, err := commonEBPF.PrepareMarker(commonEBPF.MarkerConfig{
++		Path:          i.cgroupPath,
++		BypassProcess: i.localBypassProcess,
++		SelfBypass:    i.selfBypass,
++	})
++	if err != nil {
++		return E.Cause(err, "attach eBPF process markers")
++	}
++	i.processMarkers = markers
++	return nil
++}
++
++func (i *Inbound) closeProcessMarkers() error {
++	if i.processMarkers == nil {
++		return nil
++	}
++	err := i.processMarkers.Close()
++	i.processMarkers = nil
++	return err
++}
++
+ func (i *Inbound) prepareCgroupBackend() error {
+ 	if err := i.reclaimCgroupBackend(); err != nil {
+ 		return err
+@@ -625,8 +658,9 @@ func (i *Inbound) prepareCgroupBackend() error {
  		RedirectIPv6: i.redirectIPv6Prefix,
  		MapCapacity:  mapCapacity,
  		UDPTimeout:   i.udpTimeout,
@@ -362,7 +453,6 @@ index d7fadb9..71b0965 100644
 -		SelfBypass:   i.selfBypass,
 +		Policy:        i.compiledPolicy,
 +		BypassProcess: i.localBypassProcess,
-+		MarkerOnly:    !i.localCgroupEnabled(),
 +		SelfBypass:    i.selfBypass,
  	})
  	if err != nil {
