@@ -98,37 +98,48 @@ mihomo 的三件套是分开的，我们原来只发 `processPath` 且拼了 `(u
 "uid":         processUID,
 ```
 
-## 5. 未完成：local 的 socket_assign 拦截
+## 5. 已验证（2026-11-02 收尾）
 
-现象与已查事实：
+- `route.find_process: true` 生效，**面板进程名正常显示**（zashboard / metacubexd 都读 `metadata.process`，metacubexd 另有 `processPath`）；
+- 交付设备命名已修：`netkit-l3` 建出 `sb-netkit-*`，日志 `delivery_used: netkit-l3`，`delivery_interface: sb-netkit-33fab`；
+- `bypass_process` 两种数据面都可用，实测：名单里有 mihomo → 它被放过；换成 `["zzzznomatch"]` → 它立刻被代理；
+- LPM 内容核对无误（`daed`=0x20、`dae`=0x18、`dockerd`=0x38、`docker`=0x30、`honk-core`=0x48），无 0 长度条目。
 
-- `sb_tc_local_l2` 已挂 eth0 egress（TCX），`sb_tc_ctl` 里 `flags=1`、`delivery_ifindex=0x4f=79` 均正确；
-- `sb_tc_stats` **全零** → `local_egress_mark` 在第一个统计点之前返回；
-- 境外地址 `curl` 卡在 `SYN-SENT`，sing-box **没有任何连接日志**（即根本没产生连接）；
-- L2 与 L3 表现一致 → 与交付链路类型/命名无关；
-- `ss` 显示的是 socket 对端真实地址，**不能**用来判断包有没有被改写（我一度据此误判）。
+### 最终决定：local 固定用 cgroup
 
-锁定到两行：
-
-```c
-if (control == 0 || control->enabled == 0U || control->delivery_ifindex == 0U) return TC_ACT_UNSPEC;
-if (skb->ingress_ifindex != 0U) return TC_ACT_UNSPEC;
+```json
+"local":  { "data_plane": "cgroup" }
+"shared": { "data_plane": "socket_assign", "tcx_position": "head" }
 ```
 
-控制块已排除，所以嫌疑集中在 `skb->ingress_ifindex != 0`（包可能被 landscape 重投过一次）。
+`experimental.ebpf.delivery` 保留 `netkit-l3`（shared 需要），`tcx_position` 对 local 不再有意义。
 
-**下一步（如果重启这个线）**：在 `native/tc.bpf.c` 的 `local_egress_mark` 里加六个计数器到已有 `sb_tc_stats`：
+### 未解：local 的 socket_assign 拦截
+
+事实：
+
+- `sb_tc_local_l2` 已挂 eth0 egress（TCX），`sb_tc_ctl` 的 `flags=1`、`delivery_ifindex=0x4f=79` 均正确；
+- `sb_tc_stats` **全零**，Clash API 里**没有**源地址为 `192.168.99.3` 的连接 → 包原样出去，压根没产生连接；
+- L2/L3 表现一致；挂 `tail` 实测**可用**，挂 `head` 不行；
+- `local_egress_mark` **不看源地址**（源码确认）：只有 `safety_bypass(destination)`（dst 为 0/127/≥224 直接 PASS）、`host_destination`、`bypass_destination`、端口、uid、socket 元数据；
+- 因此若有前置 nft/tproxy 把 dst 改成了 `127.0.0.1:6942`，我们在 TC 看到的就是 127 → 第一行 PASS 且不计数。但这对 head/tail 一样，解释不了差异。
+
+未确认的假设：head 时 TCX 锚点落空（程序没进判定），或 landscape 的 egress 程序改写了包状态。
+
+**下一步（如果重启这条线）**：在 `native/tc.bpf.c` 的 `local_egress_mark` 每个 `return` 前加一个计数器：
 
 ```
 SKIP_ENABLED / SKIP_INGRESS / SKIP_PARSE / SKIP_SELECT / SKIP_SELFBYPASS / REDIRECTED
 ```
 
-一次 `bpftool map dump name sb_tc_stats` 即可定位。**需要 `make generate`。**
+复用 `sb_tc_stats`，不新增 map，一次 `bpftool map dump name sb_tc_stats` 即可定位。**需要 `make generate`。**
+
 
 ## 6. 与 landscape / einat 的共存
 
 - **einat**：传统 clsact，只处理它绑定的那张接口。TCX 恒先于 clsact，所以我们的程序总在它之前，它看不到被劫持的包。
 - **landscape（TCX fork）**：默认 `Order::Last`（追加到链尾），我们 `head`，天然在其之前。
+- ⚠️ 但 local 的 TCX 实测 `head` 不生效、`tail` 可用（见第 5 节），结论尚未查清——**动 local 的 `tcx_position` 前先读第 5 节**。
 - 被劫持的包在我们这里 `bpf_redirect` 就终止了本 hook，后面的 NAT 不会执行，**不存在“要不要放过”的问题**。
 - mark 给谁看？没人看：einat 只把 `skb->mark` 当 fib lookup 输入；landscape 的 32 位 mark 已全部占满（layout/trace/action/reuse/flow id）。**结论：不要用 mark 做旁路**。
 - 两个 ebpf inbound 各自有独立私有 netns（`link-netnsid 4` / `5`），所以两条交付链路是**必需**的，不是冗余。
