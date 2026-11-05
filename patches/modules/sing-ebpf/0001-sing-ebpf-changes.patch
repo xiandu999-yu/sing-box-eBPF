@@ -238,10 +238,20 @@ index f7d81ab..11dd2b8 100644
  
  func DefaultCgroupMapCapacity() CgroupMapCapacity {
 diff --git a/internal/core/cgroup_backend.go b/internal/core/cgroup_backend.go
-index 9a78ac7..1789210 100644
+index 9a78ac7..b5102b3 100644
 --- a/internal/core/cgroup_backend.go
 +++ b/internal/core/cgroup_backend.go
-@@ -168,14 +168,16 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -107,6 +107,9 @@ type cgroupRuntime struct {
+ }
+ 
+ type CgroupBackend struct {
++	bypassProcess           []string
++	ownerTGID               uint32
++	markerOnly              bool
+ 	access                 sync.RWMutex
+ 	health                 backendHealth
+ 	recovery               cgroupRecoveryStore
+@@ -168,14 +171,16 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  			return nil, err
  		}
  	}
@@ -266,7 +276,7 @@ index 9a78ac7..1789210 100644
  	}
  	udpTimeoutSeconds := uint32(0)
  	if config.EnableUDP {
-@@ -238,12 +240,17 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -238,12 +243,17 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  	socketReleaseSupported := false
  	skStorage := false
  	coarseTimeSupported := false
@@ -287,7 +297,7 @@ index 9a78ac7..1789210 100644
  		}
  	}
  	if socketReleaseSupported &&
-@@ -290,6 +297,14 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -290,6 +300,14 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  		}
  		return nil, err
  	}
@@ -302,7 +312,7 @@ index 9a78ac7..1789210 100644
  	backend := &CgroupBackend{
  		mapCapacity:         mapCapacity,
  		runtime:             runtimeState,
-@@ -312,6 +327,9 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -312,6 +330,9 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  		udpTimeoutSeconds:   udpTimeoutSeconds,
  		bypassIPv4CIDR:      slices.Clone(policy.localInitialBypass.ipv4),
  		bypassIPv6CIDR:      slices.Clone(policy.localInitialBypass.ipv6),
