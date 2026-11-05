@@ -657,7 +657,7 @@ index 0000000..80d573b
 +	return key, nil
 +}
 diff --git a/internal/core/tc.go b/internal/core/tc.go
-index 35c4655..4729aaf 100644
+index 35c4655..a1ab038 100644
 --- a/internal/core/tc.go
 +++ b/internal/core/tc.go
 @@ -102,6 +102,13 @@ type TCConfig struct {
@@ -694,6 +694,21 @@ index 35c4655..4729aaf 100644
  		runtime:            &tcRuntime{maps: maps, programs: loadedPrograms},
  		tcpListenerMap:     config.EnableTCP && !legacyTCP,
  		control:            controlValue,
+@@ -1281,6 +1294,14 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
+ func (b *TCBackend) DeliveryIngressProgramFD() int { return b.programFD(tcProgramDeliveryIngress) }
+ func (b *TCBackend) IsolatedReturnProgramFD() int  { return b.programFD(tcProgramIsolatedReturn) }
+ 
++func (b *TCBackend) DeliveryIngressProgram() *CiliumEBPF.Program {
++	return b.program(tcProgramDeliveryIngress)
++}
++
++func (b *TCBackend) IsolatedReturnProgram() *CiliumEBPF.Program {
++	return b.program(tcProgramIsolatedReturn)
++}
++
+ func (b *TCBackend) programFD(index int) int {
+ 	if b == nil {
+ 		return -1
 diff --git a/internal/core/tcx_order.go b/internal/core/tcx_order.go
 index 86c87a4..9992805 100644
 --- a/internal/core/tcx_order.go
@@ -1073,10 +1088,10 @@ index 31d06ac..8fc04be 100644
  				if added {
  					return E.Errors(err, closeTCXRoleLink(attachment, local))
 diff --git a/runtime/tc_delivery.go b/runtime/tc_delivery.go
-index 40d3943..f34e69c 100644
+index 40d3943..22a8aaf 100644
 --- a/runtime/tc_delivery.go
 +++ b/runtime/tc_delivery.go
-@@ -4,8 +4,8 @@ package runtime
+@@ -4,13 +4,16 @@ package runtime
  
  import (
  	"crypto/rand"
@@ -1086,7 +1101,15 @@ index 40d3943..f34e69c 100644
  	"net"
  	"os"
  	"strings"
-@@ -46,13 +46,34 @@ func tcDeliveryMACAddress(link netlink.Link) (commonEBPF.MACAddress, bool) {
+ 
++	CiliumEBPF "github.com/cilium/ebpf"
++
+ 	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
++	intcore "github.com/CHIZI-0618/sing-ebpf/internal/core"
+ 	"github.com/sagernet/netlink"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	"golang.org/x/sys/unix"
+@@ -46,13 +49,34 @@ func tcDeliveryMACAddress(link netlink.Link) (commonEBPF.MACAddress, bool) {
  }
  
  func nextTCVethNames() (string, string, error) {
@@ -1127,7 +1150,7 @@ index 40d3943..f34e69c 100644
  		}
  		_, redirectErr := netlink.LinkByName(redirectName)
  		_, deliveryErr := netlink.LinkByName(deliveryName)
-@@ -69,6 +90,14 @@ func nextTCVethNames() (string, string, error) {
+@@ -69,6 +93,40 @@ func nextTCVethNames() (string, string, error) {
  	return "", "", E.New("unable to allocate TC eBPF delivery link name")
  }
  
@@ -1137,6 +1160,32 @@ index 40d3943..f34e69c 100644
 +		return "", err
 +	}
 +	return hex.EncodeToString(raw)[:length], nil
++}
++
++
++// attachTCDeliveryHook attaches one delivery hook, preferring TCX and falling
++// back to clsact when TCX is unavailable on this kernel or hook. The delivery
++// link is created on demand, so the hook order must follow the configured
++// TCX position instead of always landing behind clsact programs.
++func attachTCDeliveryHook(device netlink.Link, program *CiliumEBPF.Program, programFD int, name string,
++	handle, priority uint16, backend *commonEBPF.TCBackend) (tcxAttachedLink, *netlink.BpfFilter, error) {
++	if program != nil {
++		attached, err := tcxAttach(device.Attrs().Index, CiliumEBPF.AttachTCXIngress, program, backend, priority)
++		if err == nil {
++			return attached, nil, nil
++		}
++		if !tcxUnsupportedError(err) && !errors.Is(err, intcore.ErrTCXOrderUnavailable) {
++			return nil, nil, E.Cause(err, "attach TCX ", name)
++		}
++	}
++	if err := ensureTCClsact(device); err != nil {
++		return nil, nil, err
++	}
++	filter, err := attachTCFilter(device, netlink.HANDLE_MIN_INGRESS, programFD, name, handle, priority)
++	if err != nil {
++		return nil, nil, err
++	}
++	return nil, filter, nil
 +}
 +
  // These settings are applied only inside the caller-owned private namespace.
@@ -1206,7 +1255,7 @@ index 0000000..8543573
 +	}
 +}
 diff --git a/runtime/tc_isolated_delivery.go b/runtime/tc_isolated_delivery.go
-index 89c53ff..b998d84 100644
+index 89c53ff..19d4a91 100644
 --- a/runtime/tc_isolated_delivery.go
 +++ b/runtime/tc_isolated_delivery.go
 @@ -51,10 +51,6 @@ func (d *tcDataPlane) inNamespace(block func() error) error {
@@ -1253,7 +1302,7 @@ index 89c53ff..b998d84 100644
  	cleanup := func(cause error) (*tcDeliveryLink, error) {
  		err := E.Errors(cause, owner.Close())
  		if owner.IsClosed() {
-@@ -90,12 +88,9 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+@@ -90,22 +88,17 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
  		}
  		return owner, err
  	}
@@ -1267,7 +1316,34 @@ index 89c53ff..b998d84 100644
  		return cleanup(E.Cause(err, "find TC eBPF redirect link"))
  	}
  	if err = netlink.LinkSetUp(owner.redirect); err != nil {
-@@ -129,7 +124,7 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+ 		return cleanup(err)
+ 	}
+-	if err = ensureTCClsact(owner.redirect); err != nil {
+-		return cleanup(err)
+-	}
+-	owner.returnFilter, err = attachTCFilter(owner.redirect, netlink.HANDLE_MIN_INGRESS,
+-		rawTCBackend(d.backend).IsolatedReturnProgramFD(), "sb_tc_return", tcReturnFilterHandle, d.priority)
++	owner.returnLink, owner.returnFilter, err = attachTCDeliveryHook(owner.redirect,
++		rawTCBackend(d.backend).IsolatedReturnProgram(), rawTCBackend(d.backend).IsolatedReturnProgramFD(),
++		"sb_tc_return", tcReturnFilterHandle, d.priority, d.backend)
+ 	if err != nil {
+ 		return cleanup(err)
+ 	}
+@@ -118,18 +111,16 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+ 		if _, err = owner.configureIsolatedPeer(true); err != nil {
+ 			return err
+ 		}
+-		if err = ensureTCClsact(owner.delivery); err != nil {
+-			return err
+-		}
+-		owner.filter, err = attachTCFilter(owner.delivery, netlink.HANDLE_MIN_INGRESS,
+-			rawTCBackend(d.backend).DeliveryIngressProgramFD(), "sb_tc_deliver", tcDeliveryFilterHandle, d.priority)
++		owner.deliverLink, owner.filter, err = attachTCDeliveryHook(owner.delivery,
++			rawTCBackend(d.backend).DeliveryIngressProgram(), rawTCBackend(d.backend).DeliveryIngressProgramFD(),
++			"sb_tc_deliver", tcDeliveryFilterHandle, d.priority, d.backend)
+ 		return err
+ 	})
+ 	if err != nil {
  		return cleanup(E.Cause(err, "configure TC namespace"))
  	}
  	mac, valid := tcDeliveryMACAddress(owner.delivery)
