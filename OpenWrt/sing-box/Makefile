@@ -11,11 +11,11 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sing-box
 PKG_VERSION:=1.15.0-alpha.13
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 
-PKG_SOURCE:=sing-box-src-1.15.0-alpha.13-a911d3f4a976.tar.gz
+PKG_SOURCE:=sing-box-src-1.15.0-alpha.13-f8ec8567b973.tar.gz
 PKG_SOURCE_URL:=https://github.com/xiandu999-yu/sing-box-eBPF/releases/download/sing-box-src/
-PKG_HASH:=a911d3f4a9760f13b0cc72062ceb4e3c752a169df9e454e2637a70dd5861133c
+PKG_HASH:=f8ec8567b973bd6faa59c51018dad58fbd5c4377e427b23d26ec43a3fbfabfbf
 
 PKG_LICENSE:=GPL-3.0-or-later
 PKG_LICENSE_FILES:=LICENSE
