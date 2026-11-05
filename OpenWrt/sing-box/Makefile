@@ -1,208 +1,61 @@
+# sing-box (CHIZI-0618 eBPF fork + sing-ebpf 模块)
+#
+# 源码来自本仓库 sing-box-src release 里组装好的 tarball：
+#   sing-box/src     ← sing-box（已打补丁）
+#   sing-box/module  ← sing-ebpf（已打补丁，含预编译 .o）
+# OpenWrt 侧不做模块拉取、不打补丁、不跑 clang。
+#
+# PKG_SOURCE / PKG_HASH 由 .github/workflows/assemble-source.yml 自动写回。
+
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sing-box
-PKG_VERSION:=1.14.4
+PKG_VERSION:=1.15.0-alpha.13
 PKG_RELEASE:=1
 
-# reF1nd eBPF fork, pinned to a commit. patches/ add the local tweaks on top.
-PKG_SOURCE_PROTO:=git
-PKG_SOURCE_URL:=https://github.com/reF1nd/sing-box.git
-PKG_SOURCE_VERSION:=732618a5989cd2566f072c374fe2f619200f33f9
-PKG_MIRROR_HASH:=skip
-
-# eBPF data plane module: upstream path, replaced by our fork.
-SINGBOX_EBPF_ORIGINAL:=github.com/CHIZI-0618/sing-ebpf
-SINGBOX_EBPF_MODULE:=github.com/xiandu999-yu/sing-ebpf
-SINGBOX_EBPF_VERSION:=v0.0.0-20261102094823-f5d6d1aac7d8
-SINGBOX_EBPF_SUM:=h1:JItX3T7PInGqNV2gpDRTX+GbNvSrxcUoZ+/lKs0VsGM=
-SINGBOX_EBPF_MODSUM:=h1:M69uFpO3TVVwRP1IAaS9rIol7mgJA0Q+eoU7wap5qxI=
+PKG_SOURCE:=sing-box-src-1.15.0-alpha.13-PLACEHOLDER.tar.gz
+PKG_SOURCE_URL:=https://github.com/xiandu999-yu/sing-box-eBPF/releases/download/sing-box-src/
+PKG_HASH:=PLACEHOLDER
 
 PKG_LICENSE:=GPL-3.0-or-later
 PKG_LICENSE_FILES:=LICENSE
-PKG_MAINTAINER:=Van Waholtz <brvphoenix@gmail.com>
+PKG_MAINTAINER:=xiandu999-yu
 PKG_CPE_ID:=cpe:/a:sagernet:sing-box
 
 PKG_BUILD_DEPENDS:=golang/host
 PKG_BUILD_PARALLEL:=1
 PKG_BUILD_FLAGS:=no-mips16
 
+# tarball 里是 sing-box/{src,module}，剥掉顶层后 src 就是模块根目录。
+PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)/src
+PKG_UNPACK:=$(HOST_TAR) -C $(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION) --strip-components=1 -xzf $(DL_DIR)/$(PKG_SOURCE)
+
 GO_PKG:=github.com/sagernet/sing-box
 GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/sing-box
-
-GO_PKG_LDFLAGS:=-checklinkname=0
+GO_PKG_LDFLAGS:=-checklinkname=0 -s -w -buildid=
 GO_PKG_LDFLAGS_X:=$(GO_PKG)/constant.Version=$(PKG_VERSION)
+GO_PKG_TAGS:=with_ebpf,with_clash_api,with_quic,with_utls,with_gvisor,with_wireguard,badlinkname
 
-include $(INCLUDE_DIR)/package.mk
-include ../../lang/golang/golang-package.mk
+include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
 
-# The module fork carries newer dependencies than the pinned upstream module, so
-# go.mod needs updating during the build; allow that instead of failing with
-# "updates to go.mod needed".
-GO_PKG_BUILD_CONFIG_VARS+=\
-	GOFLAGS=-mod=mod
-
-define Package/sing-box-default
-  TITLE:=The universal proxy platform
+define Package/sing-box
   SECTION:=net
   CATEGORY:=Network
-  URL:=https://sing-box.sagernet.org
+  TITLE:=The universal proxy platform (eBPF build)
+  URL:=https://github.com/CHIZI-0618/sing-box
   DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle +kmod-inet-diag +kmod-tun
   USERID:=sing-box=5566:sing-box=5566
 endef
 
-define Package/sing-box
-  $(Package/sing-box-default)
-  TITLE+= (full)
-  VARIANT:=full
-  DEFAULT_VARIANT:=1
-endef
-
 define Package/sing-box/description
-  Sing-box is a universal proxy platform which supports hysteria, SOCKS, Shadowsocks,
-  ShadowTLS, Tor, trojan, VLess, VMess, WireGuard and so on.
-endef
-
-define Package/sing-box-tiny
-  $(Package/sing-box-default)
-  TITLE+= (tiny)
-  PROVIDES:=sing-box
-  VARIANT:=tiny
-  CONFLICTS:=sing-box
-endef
-
-Package/sing-box-tiny/description:=$(Package/sing-box/description)
-
-define Package/sing-box/config
-	menu "Select build options"
-		depends on PACKAGE_sing-box
-
-		config SINGBOX_WITH_ACME
-			bool "Build with ACME TLS certificate issuer support"
-
-		config SINGBOX_WITH_CCM
-			bool "Build with Claude Code Multiplexer service support"
-
-		config SINGBOX_WITH_CLASH_API
-			bool "Build with Clash API support"
-			default y
-
-		config SINGBOX_WITH_CLOUDFLARED
-			bool "Build with Cloudflare Tunnel inbound support"
-
-		config SINGBOX_WITH_DHCP
-			bool "Build with DHCP support, see DHCP DNS transport."
-
-		config SINGBOX_WITH_EBPF
-			bool "Build with eBPF inbound support (local/shared data plane, TCX, netkit)"
-
-		config SINGBOX_WITH_EMBEDDED_TOR
-			bool "Build with embedded Tor support"
-
-		config SINGBOX_WITH_GRPC
-			bool "Build with standard gRPC support"
-
-		config SINGBOX_WITH_GVISOR
-			bool "Build with gVisor support"
-			default y
-
-		config SINGBOX_WITH_OCM
-			bool "Build with OpenAI Codex Multiplexer service support"
-
-		config SINGBOX_WITH_OPENCONNECT
-			bool "Build with OpenConnect client support"
-
-		config SINGBOX_WITH_OPENVPN
-			bool "Build with OpenVPN client and server support"
-
-		config SINGBOX_WITH_QUIC
-			bool "Build with QUIC support"
-			default y
-
-		config SINGBOX_WITH_TAILSCALE
-			bool "Build with Tailscale support"
-			default y
-
-		config SINGBOX_WITH_USBIP
-			bool "Build with USB/IP service support"
-
-		config SINGBOX_WITH_UTLS
-			bool "Build with uTLS support for TLS outbound"
-			default y
-
-		config SINGBOX_WITH_V2RAY_API
-			bool "Build with V2Ray API support"
-
-		config SINGBOX_WITH_WIREGUARD
-			bool "Build with WireGuard support"
-			default y
-	endmenu
-endef
-
-PKG_CONFIG_DEPENDS:= \
-	CONFIG_SINGBOX_WITH_ACME \
-	CONFIG_SINGBOX_WITH_CCM \
-	CONFIG_SINGBOX_WITH_CLASH_API \
-	CONFIG_SINGBOX_WITH_CLOUDFLARED \
-	CONFIG_SINGBOX_WITH_DHCP \
-	CONFIG_SINGBOX_WITH_EBPF \
-	CONFIG_SINGBOX_WITH_EMBEDDED_TOR \
-	CONFIG_SINGBOX_WITH_GRPC \
-	CONFIG_SINGBOX_WITH_GVISOR \
-	CONFIG_SINGBOX_WITH_OCM \
-	CONFIG_SINGBOX_WITH_OPENCONNECT \
-	CONFIG_SINGBOX_WITH_OPENVPN \
-	CONFIG_SINGBOX_WITH_QUIC \
-	CONFIG_SINGBOX_WITH_TAILSCALE \
-	CONFIG_SINGBOX_WITH_USBIP \
-	CONFIG_SINGBOX_WITH_UTLS \
-	CONFIG_SINGBOX_WITH_V2RAY_API \
-	CONFIG_SINGBOX_WITH_WIREGUARD
-
-ifeq ($(BUILD_VARIANT),tiny)
-ifeq ($(CONFIG_SMALL_FLASH),)
-GO_PKG_TAGS:=with_gvisor
-endif
-GO_PKG_TAGS:=$(subst $(space),$(comma),$(strip $(GO_PKG_TAGS) with_quic with_utls with_clash_api badlinkname tfogo_checklinkname0))
-else
-GO_PKG_TAGS:=$(subst $(space),$(comma),$(strip \
-	$(if $(CONFIG_SINGBOX_WITH_ACME),with_acme) \
-	$(if $(CONFIG_SINGBOX_WITH_CCM),with_ccm) \
-	$(if $(CONFIG_SINGBOX_WITH_CLASH_API),with_clash_api) \
-	$(if $(CONFIG_SINGBOX_WITH_CLOUDFLARED),with_cloudflared) \
-	$(if $(CONFIG_SINGBOX_WITH_DHCP),with_dhcp) \
-	$(if $(CONFIG_SINGBOX_WITH_EBPF),with_ebpf) \
-	$(if $(CONFIG_SINGBOX_WITH_EMBEDDED_TOR),with_embedded_tor) \
-	$(if $(CONFIG_SINGBOX_WITH_GRPC),with_grpc) \
-	$(if $(CONFIG_SINGBOX_WITH_GVISOR),with_gvisor) \
-	$(if $(CONFIG_SINGBOX_WITH_OCM),with_ocm) \
-	$(if $(CONFIG_SINGBOX_WITH_OPENCONNECT),with_openconnect) \
-	$(if $(CONFIG_SINGBOX_WITH_OPENVPN),with_openvpn) \
-	$(if $(CONFIG_SINGBOX_WITH_QUIC),with_quic) \
-	$(if $(CONFIG_SINGBOX_WITH_TAILSCALE),with_tailscale) \
-	$(if $(CONFIG_SINGBOX_WITH_USBIP),with_usbip) \
-	$(if $(CONFIG_SINGBOX_WITH_UTLS),with_utls) \
-	$(if $(CONFIG_SINGBOX_WITH_V2RAY_API),with_v2ray_api) \
-	$(if $(CONFIG_SINGBOX_WITH_WIREGUARD),with_wireguard) \
-	badlinkname \
-	tfogo_checklinkname0 \
-))
-endif
-
-define Build/Prepare
-	$(call Build/Prepare/Default)
-	# Point the eBPF data plane at the fork that carries our changes.
-	sed -i '/xiandu999-yu\/sing-ebpf/d' $(PKG_BUILD_DIR)/go.mod $(PKG_BUILD_DIR)/go.sum
-	echo 'replace $(SINGBOX_EBPF_ORIGINAL) => $(SINGBOX_EBPF_MODULE) $(SINGBOX_EBPF_VERSION)' >> $(PKG_BUILD_DIR)/go.mod
-	echo '$(SINGBOX_EBPF_MODULE) $(SINGBOX_EBPF_VERSION) $(SINGBOX_EBPF_SUM)' >> $(PKG_BUILD_DIR)/go.sum
-	echo '$(SINGBOX_EBPF_MODULE) $(SINGBOX_EBPF_VERSION)/go.mod $(SINGBOX_EBPF_MODSUM)' >> $(PKG_BUILD_DIR)/go.sum
+  sing-box with the eBPF inbound (CHIZI-0618 fork), assembled and patched in
+  sing-box-eBPF. Ships local/shared data planes, TCX ordering and delivery link.
 endef
 
 define Package/sing-box/conffiles
 /etc/config/sing-box
 /etc/sing-box/
 endef
-
-Package/sing-box-tiny/conffiles=$(Package/sing-box/conffiles)
 
 define Package/sing-box/install
 	$(INSTALL_DIR) $(1)/usr/bin/
@@ -217,7 +70,4 @@ define Package/sing-box/install
 	$(INSTALL_BIN) ./files/sing-box.init $(1)/etc/init.d/sing-box
 endef
 
-Package/sing-box-tiny/install=$(Package/sing-box/install)
-
 $(eval $(call BuildPackage,sing-box))
-$(eval $(call BuildPackage,sing-box-tiny))
