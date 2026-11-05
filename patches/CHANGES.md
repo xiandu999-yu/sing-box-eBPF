@@ -1,13 +1,16 @@
 # 补丁说明
 
-本目录里的补丁会在 CI 拉取完源码之后、编译之前自动套用：
+本目录里的补丁由 `.github/workflows/assemble-source.yml` 在组装源码包时套用，
+产物是 `sing-box-src` release 上的 tarball；`build` 和 OpenWrt 包都只消费那份 tarball。
 
-| 补丁 / 固定点 | 目标 | 基准 |
+| 补丁 | 目标 | 基准 |
 | --- | --- | --- |
-| `sing-box/0001-delivery-option.patch` | `reF1nd/sing-box` | `sing-box.commit` 里的 commit |
-| `modules/sing-ebpf/pin.env` | `xiandu999-yu/sing-ebpf` | `MODULE_REF` 里的 commit |
+| `sing-box/0001-delivery-option.patch` | `CHIZI-0618/sing-box` | `ci/pins.env` 的 `SING_BOX_COMMIT` |
+| `modules/sing-ebpf/0001-sing-ebpf-changes.patch` | `CHIZI-0618/sing-ebpf` | `ci/pins.env` 的 `MODULE_COMMIT` |
 
-套用逻辑见 `.github/scripts/apply-patches.sh`：sing-box 本体用 `git apply --3way`；模块**不打补丁**，按 `pin.env` 解析出伪版本后 `go mod edit -replace`，所以升级模块只要改 `MODULE_REF`，不需要改这个仓库里的其它东西。
+两个补丁都是 `git apply` 套用。模块补丁里含 `internal/bpfgen/*.o` 的二进制段，
+所以组装/编译都不需要 clang，也不需要 `make generate`；只有改动 `native/*.bpf.c`
+时才要先重生成对象、再把新的 `.o` 并进补丁。
 
 ---
 
