@@ -1329,7 +1329,7 @@ index 0000000..8543573
 +	}
 +}
 diff --git a/runtime/tc_isolated_delivery.go b/runtime/tc_isolated_delivery.go
-index 89c53ff..e0d6df7 100644
+index 89c53ff..b9340a1 100644
 --- a/runtime/tc_isolated_delivery.go
 +++ b/runtime/tc_isolated_delivery.go
 @@ -51,10 +51,6 @@ func (d *tcDataPlane) inNamespace(block func() error) error {
@@ -1474,7 +1474,29 @@ index 89c53ff..e0d6df7 100644
  				}
  			}
  		}
-@@ -360,22 +357,12 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+@@ -316,7 +313,9 @@ func (d *tcDeliveryLink) healthyIsolated(priority uint16) (bool, error) {
+ 	if d.redirect.Attrs().Flags&net.FlagUp == 0 {
+ 		return false, nil
+ 	}
+-	if mac, valid := tcDeliveryMACAddress(d.delivery); !valid || mac != d.deliveryMAC {
++	if mac, valid := tcDeliveryMACAddress(d.delivery); valid && mac != d.deliveryMAC {
++		return false, nil
++	} else if !valid && d.deliveryKind != DeliveryNetkitL3 {
+ 		return false, nil
+ 	}
+ 	live, err = tcFilterAttached(d.redirect, netlink.HANDLE_MIN_INGRESS, "sb_tc_return", tcReturnFilterHandle, priority)
+@@ -344,7 +343,9 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+ 	// Anything that changes the private end's address after creation leaves
+ 	// the backend addressing frames to a MAC the interface no longer accepts.
+ 	mac, valid := tcDeliveryMACAddress(d.delivery)
+-	if !valid {
++	// netkit-l3 carries raw IP: the peer has no hardware address by design, so
++	// a missing MAC is not a reason to rebuild the link every pass.
++	if !valid && d.deliveryKind != DeliveryNetkitL3 {
+ 		return false, true, nil
+ 	}
+ 	if mac != d.deliveryMAC {
+@@ -360,22 +361,12 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
  		}
  		changed = true
  	}
@@ -1502,7 +1524,7 @@ index 89c53ff..e0d6df7 100644
  	}
  	err = d.namespace.with(func() error {
  		healthy, err := d.configureIsolatedPeer(true)
-@@ -383,17 +370,21 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+@@ -383,17 +374,21 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
  		if err != nil {
  			return err
  		}
