@@ -1088,7 +1088,7 @@ index 31d06ac..8fc04be 100644
  				if added {
  					return E.Errors(err, closeTCXRoleLink(attachment, local))
 diff --git a/runtime/tc_delivery.go b/runtime/tc_delivery.go
-index 40d3943..22a8aaf 100644
+index 40d3943..a57489f 100644
 --- a/runtime/tc_delivery.go
 +++ b/runtime/tc_delivery.go
 @@ -4,13 +4,16 @@ package runtime
@@ -1150,7 +1150,7 @@ index 40d3943..22a8aaf 100644
  		}
  		_, redirectErr := netlink.LinkByName(redirectName)
  		_, deliveryErr := netlink.LinkByName(deliveryName)
-@@ -69,6 +93,40 @@ func nextTCVethNames() (string, string, error) {
+@@ -69,6 +93,79 @@ func nextTCVethNames() (string, string, error) {
  	return "", "", E.New("unable to allocate TC eBPF delivery link name")
  }
  
@@ -1186,6 +1186,45 @@ index 40d3943..22a8aaf 100644
 +		return nil, nil, err
 +	}
 +	return nil, filter, nil
++}
++
++
++func deliveryHookAttached(attached tcxAttachedLink, filter *netlink.BpfFilter, device netlink.Link,
++	name string, handle, priority uint16) (bool, error) {
++	if attached != nil {
++		return tcxLinkAttached(attached, device.Attrs().Index, CiliumEBPF.AttachTCXIngress)
++	}
++	return tcFilterAttached(device, netlink.HANDLE_MIN_INGRESS, name, handle, priority)
++}
++
++func closeTCDeliveryHook(attached *tcxAttachedLink, filter **netlink.BpfFilter) error {
++	if *attached != nil {
++		err := (*attached).Close()
++		if err == nil {
++			*attached = nil
++		}
++		return err
++	}
++	return detachTCFilterOwned(filter)
++}
++
++func repairTCDeliveryHook(attached *tcxAttachedLink, filter **netlink.BpfFilter, device netlink.Link,
++	program *CiliumEBPF.Program, programFD int, name string, handle, priority uint16,
++	backend *commonEBPF.TCBackend) (bool, error) {
++	live, err := deliveryHookAttached(*attached, *filter, device, name, handle, priority)
++	if err != nil || live {
++		return false, err
++	}
++	if *attached != nil {
++		_ = (*attached).Close()
++		*attached = nil
++	}
++	newLink, newFilter, err := attachTCDeliveryHook(device, program, programFD, name, handle, priority, backend)
++	if err != nil {
++		return false, err
++	}
++	*attached, *filter = newLink, newFilter
++	return true, nil
 +}
 +
  // These settings are applied only inside the caller-owned private namespace.
@@ -1255,7 +1294,7 @@ index 0000000..8543573
 +	}
 +}
 diff --git a/runtime/tc_isolated_delivery.go b/runtime/tc_isolated_delivery.go
-index 89c53ff..19d4a91 100644
+index 89c53ff..e0d6df7 100644
 --- a/runtime/tc_isolated_delivery.go
 +++ b/runtime/tc_isolated_delivery.go
 @@ -51,10 +51,6 @@ func (d *tcDataPlane) inNamespace(block func() error) error {
@@ -1352,6 +1391,108 @@ index 89c53ff..19d4a91 100644
  		return cleanup(E.New("invalid TC namespace peer MAC"))
  	}
  	if err = d.backend.SetDeliveryInterface(uint32(owner.redirect.Attrs().Index), mac); err != nil {
+@@ -231,24 +222,30 @@ func (d *tcDeliveryLink) configureIsolatedPeer(repair bool) (bool, error) {
+ 				}
+ 			}
+ 		}
+-		wantNeighbor := netlink.Neigh{LinkIndex: d.delivery.Attrs().Index, Family: family,
+-			State: netlink.NUD_PERMANENT, IP: gateway, HardwareAddr: d.redirect.Attrs().HardwareAddr}
+-		neighbors, err := netlink.NeighList(wantNeighbor.LinkIndex, family)
+-		if err != nil {
+-			return false, err
+-		}
+-		found = false
+-		for _, current := range neighbors {
+-			if current.IP.Equal(gateway) && current.State == netlink.NUD_PERMANENT && bytes.Equal(current.HardwareAddr, wantNeighbor.HardwareAddr) {
+-				found = true
+-				break
++		// netkit-l3 carries raw IP: there is no Ethernet frame, no ARP and
++		// therefore no neighbor entry to install or check. Comparing a
++		// permanent neighbor against a zero hardware address would report
++		// the link unhealthy on every pass and re-create it each second.
++		if d.deliveryKind != DeliveryNetkitL3 {
++			wantNeighbor := netlink.Neigh{LinkIndex: d.delivery.Attrs().Index, Family: family,
++				State: netlink.NUD_PERMANENT, IP: gateway, HardwareAddr: d.redirect.Attrs().HardwareAddr}
++			neighbors, err := netlink.NeighList(wantNeighbor.LinkIndex, family)
++			if err != nil {
++				return false, err
+ 			}
+-		}
+-		if !found {
+-			healthy = false
+-			if repair {
+-				if err = netlink.NeighSet(&wantNeighbor); err != nil {
+-					return false, err
++			found = false
++			for _, current := range neighbors {
++				if current.IP.Equal(gateway) && current.State == netlink.NUD_PERMANENT && bytes.Equal(current.HardwareAddr, wantNeighbor.HardwareAddr) {
++					found = true
++					break
++				}
++			}
++			if !found {
++				healthy = false
++				if repair {
++					if err = netlink.NeighSet(&wantNeighbor); err != nil {
++						return false, err
++					}
+ 				}
+ 			}
+ 		}
+@@ -360,22 +357,12 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+ 		}
+ 		changed = true
+ 	}
+-	repairFilter := func(link netlink.Link, name string, handle uint16, fd int, target **netlink.BpfFilter) error {
+-		attached, err := tcFilterAttached(link, netlink.HANDLE_MIN_INGRESS, name, handle, priority)
+-		if err != nil || attached {
+-			return err
+-		}
+-		if err = ensureTCClsact(link); err != nil {
+-			return err
+-		}
+-		*target, err = attachTCFilter(link, netlink.HANDLE_MIN_INGRESS, fd, name, handle, priority)
+-		if err == nil {
+-			changed = true
+-		}
+-		return err
+-	}
+-	if err = repairFilter(d.redirect, "sb_tc_return", tcReturnFilterHandle, rawTCBackend(backend).IsolatedReturnProgramFD(), &d.returnFilter); err != nil {
++	if repaired, err := repairTCDeliveryHook(&d.returnLink, &d.returnFilter, d.redirect,
++		rawTCBackend(backend).IsolatedReturnProgram(), rawTCBackend(backend).IsolatedReturnProgramFD(),
++		"sb_tc_return", tcReturnFilterHandle, priority, backend); err != nil {
+ 		return changed, false, err
++	} else {
++		changed = changed || repaired
+ 	}
+ 	err = d.namespace.with(func() error {
+ 		healthy, err := d.configureIsolatedPeer(true)
+@@ -383,17 +370,21 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+ 		if err != nil {
+ 			return err
+ 		}
+-		return repairFilter(d.delivery, "sb_tc_deliver", tcDeliveryFilterHandle, rawTCBackend(backend).DeliveryIngressProgramFD(), &d.filter)
++		repaired, err := repairTCDeliveryHook(&d.deliverLink, &d.filter, d.delivery,
++			rawTCBackend(backend).DeliveryIngressProgram(), rawTCBackend(backend).DeliveryIngressProgramFD(),
++			"sb_tc_deliver", tcDeliveryFilterHandle, priority, backend)
++		changed = changed || repaired
++		return err
+ 	})
+ 	return changed, false, err
+ }
+ 
+ func (d *tcDeliveryLink) closeIsolated() error {
+-	if err := detachTCFilterOwned(&d.returnFilter); err != nil {
++	if err := closeTCDeliveryHook(&d.returnLink, &d.returnFilter); err != nil {
+ 		return err
+ 	}
+-	if d.filter != nil {
+-		if err := d.namespace.with(func() error { return detachTCFilterOwned(&d.filter) }); err != nil {
++	if d.deliverLink != nil || d.filter != nil {
++		if err := d.namespace.with(func() error { return closeTCDeliveryHook(&d.deliverLink, &d.filter) }); err != nil {
+ 			return err
+ 		}
+ 	}
 diff --git a/runtime/tc_netkit.go b/runtime/tc_netkit.go
 new file mode 100644
 index 0000000..4dce9d9
