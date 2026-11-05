@@ -2,7 +2,7 @@ name: Assemble sing-box source
 
 # 把 sing-box 固定点 + sing-ebpf 模块 + 两份补丁组装成一个源码 tarball，
 # 发布到 sing-box-src release，并把 PKG_SOURCE / PKG_HASH 写回
-# OpenWrt/sing-box/Makefile。OpenWrt 侧只消费这份 tarball。
+# openwrt/sing-box/Makefile。OpenWrt 侧只消费这份 tarball。
 on:
   workflow_dispatch:
 
@@ -96,7 +96,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          MK=OpenWrt/sing-box/Makefile
+          MK=openwrt/sing-box/Makefile
           cur_ver=$(sed -n 's/^PKG_VERSION:=//p' "$MK")
           cur_rel=$(sed -n 's/^PKG_RELEASE:=//p' "$MK")
           if [ "$cur_ver" = "${SING_BOX_VERSION}" ] && grep -qx "PKG_SOURCE:=${TARBALL}" "$MK"; then

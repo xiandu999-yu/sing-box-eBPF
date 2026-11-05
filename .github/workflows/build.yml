@@ -86,7 +86,7 @@ jobs:
         run: |
           set -euo pipefail
           override="${{ inputs.version }}"
-          pinned="${{ needs.version.outputs.pinned_version }}"
+          pinned="${{ steps.pin.outputs.version }}"
           raw="${override:-${pinned}}"
           raw="${raw#v}"
           [ -n "${raw}" ] || { echo "::error::no version: set SING_BOX_VERSION in ci/pins.env"; exit 1; }
@@ -153,8 +153,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tarball=$(sed -n 's/^PKG_SOURCE:=//p' openwrt/sing-box/Makefile)
-          [ -n "${tarball}" ] || { echo "::error::PKG_SOURCE is empty in openwrt/sing-box/Makefile"; exit 1; }
+          tarball=$(sed -n 's/^PKG_SOURCE:=//p' OpenWrt/sing-box/Makefile)
+          [ -n "${tarball}" ] || { echo "::error::PKG_SOURCE is empty in OpenWrt/sing-box/Makefile"; exit 1; }
           echo "tarball: ${tarball}"
           gh release download sing-box-src --repo "${{ github.repository }}" \
             --pattern "${tarball}" --dir .
