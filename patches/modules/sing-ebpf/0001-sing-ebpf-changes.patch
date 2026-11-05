@@ -60,10 +60,25 @@ index 0000000..0ef39f6
 +          if-no-files-found: error
 +          retention-days: 7
 diff --git a/api.go b/api.go
-index 8600b25..b4592dc 100644
+index 8600b25..5bbc4b1 100644
 --- a/api.go
 +++ b/api.go
-@@ -216,6 +216,13 @@ type CgroupConfig struct {
+@@ -142,6 +142,14 @@ type SelfBypass struct {
+ 	core.SelfBypassHandle
+ }
+ 
++// Compatibility aliases: the sing-box fork this tree is assembled with still
++// calls the pre-rename sweep API. Dev renamed it to the TC flow store names.
++type TCAssignmentSweepResult = core.TCFlowSweepResult
++
++func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint32) (TCAssignmentSweepResult, error) {
++	return core.UnwrapTCBackend(b).SweepFlows(maxIdle, fallbackBudget)
++}
++
+ func NewSelfBypass() (*SelfBypass, error) {
+ 	backend, err := core.NewSelfBypass()
+ 	if err != nil {
+@@ -216,6 +224,13 @@ type CgroupConfig struct {
  	UDPTimeout   time.Duration
  	Policy       CompiledPolicy
  	SelfBypass   *SelfBypass
@@ -77,7 +92,7 @@ index 8600b25..b4592dc 100644
  }
  
  func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
-@@ -228,10 +235,53 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -228,10 +243,53 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  		RedirectIPv6: config.RedirectIPv6,
  		MapCapacity:  config.MapCapacity,
  		UDPTimeout:   config.UDPTimeout,
@@ -132,7 +147,7 @@ index 8600b25..b4592dc 100644
  type ProcessTrackerConfig struct {
  	EnableTCP    bool
  	EnableUDP    bool
-@@ -262,6 +312,12 @@ type TCConfig struct {
+@@ -262,6 +320,12 @@ type TCConfig struct {
  	EnableTCP          bool
  	EnableUDP          bool
  	DeliveryInterface  uint32
@@ -145,7 +160,7 @@ index 8600b25..b4592dc 100644
  	Policy             CompiledPolicy
  	RoutingMark        uint32
  	SelfBypass         *SelfBypass
-@@ -286,6 +342,9 @@ func PrepareTC(config TCConfig) (*TCBackend, error) {
+@@ -286,6 +350,9 @@ func PrepareTC(config TCConfig) (*TCBackend, error) {
  		EnableTCP:          config.EnableTCP,
  		EnableUDP:          config.EnableUDP,
  		DeliveryInterface:  config.DeliveryInterface,
