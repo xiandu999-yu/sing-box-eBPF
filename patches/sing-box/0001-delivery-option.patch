@@ -477,10 +477,10 @@ index 2b0618b..b03a51c 100644
  	if err != nil {
  		return err
 diff --git a/protocol/ebpf/interface_topology.go b/protocol/ebpf/interface_topology.go
-index 4781da9..d231daa 100644
+index 4781da9..9f514b8 100644
 --- a/protocol/ebpf/interface_topology.go
 +++ b/protocol/ebpf/interface_topology.go
-@@ -17,7 +17,22 @@ func (i *Inbound) repairTCInfrastructure() (bool, error) {
+@@ -17,7 +17,24 @@ func (i *Inbound) repairTCInfrastructure() (bool, error) {
  	if i.tcDataPlane == nil {
  		return false, nil
  	}
@@ -493,14 +493,43 @@ index 4781da9..d231daa 100644
 +		namespacePath = i.tcNamespace.Path()
 +	}
 +	i.tcNamespaceAccess.RUnlock()
-+	i.logger.Debug("eBPF ", ebpfStructuredEvent("tc_repair", map[string]any{
++	if changed {
++		i.logger.Debug("eBPF ", ebpfStructuredEvent("tc_repair", map[string]any{
 +		"changed":          changed,
 +		"routing_changed":  routingChanged,
 +		"delivery_changed": deliveryChanged,
 +		"namespace_path":   namespacePath,
 +		"namespace_owned":  namespacePath != "",
-+	}))
++		}))
++	}
 +	return changed, err
  }
  
  func (i *Inbound) monitoredDefaultInterfaceName() string {
+diff --git a/protocol/ebpf/tc_connection.go b/protocol/ebpf/tc_connection.go
+index 7e6175f..f270d08 100644
+--- a/protocol/ebpf/tc_connection.go
++++ b/protocol/ebpf/tc_connection.go
+@@ -33,7 +33,7 @@ func (i *Inbound) newTCConnection(
+ ) {
+ 	source := M.SocksaddrFromNet(conn.RemoteAddr()).AddrPort()
+ 	destination := M.SocksaddrFromNet(conn.LocalAddr()).AddrPort()
+-	assignment, err := backend.LookupAssignment(commonEBPF.ProtocolTCP, source, destination, 0, true)
++	assignment, err := backend.LookupAssignment(commonEBPF.ProtocolTCP, source, destination, 0, false)
+ 	i.requestTCAssignmentMaintenance()
+ 	if err != nil {
+ 		i.counters.assignmentLookupFailures.Add(1)
+@@ -47,6 +47,13 @@ func (i *Inbound) newTCConnection(
+ 		_ = conn.Close()
+ 		return
+ 	}
++	// Retirement is fenced against the assignment entry: dropping the assignment
++	// first marks the return route retiring, and AcquireReturnRoute then refuses
++	// the handle. Take the return route, then retire the assignment; a failure
++	// here is harmless because the assignment sweeper reclaims it.
++	if _, err = backend.RemoveAssignmentIfMatch(commonEBPF.ProtocolTCP, source, destination, 0, assignment); err != nil {
++		i.tcpWarnings.errorContext(i.logger, ctx, "retire TC eBPF TCP assignment: ", err)
++	}
+ 	onClose = N.AppendClose(onClose, N.OnceClose(func(error) { returnHandle.Release() }))
+ 	metadata.Inbound = i.Tag()
+ 	metadata.InboundType = i.Type()
