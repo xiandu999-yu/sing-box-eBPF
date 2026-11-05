@@ -48,8 +48,7 @@ jobs:
             git -C "$OUT/src" apply --whitespace=nowarn "$GITHUB_WORKSPACE"/patches/sing-box/*.patch
           fi
 
-          # 模块补丁（pname 旁路、netkit-L3 等；目前模块侧改动在 fork 里，
-          # 等这些改动补丁化之后，这里会多一步 apply）
+          # 模块补丁（pname 旁路等；目前模块改动还在 fork 里，补丁化后这里自动生效）
           if ls patches/modules/sing-ebpf/*.patch >/dev/null 2>&1; then
             git -C "$OUT/module" apply --whitespace=nowarn "$GITHUB_WORKSPACE"/patches/modules/sing-ebpf/*.patch
           fi
@@ -58,10 +57,12 @@ jobs:
               && go mod edit -replace "${MODULE_PATH}=../module" \
               && go mod tidy )
 
+          # 用源码 commit 的时间做可复现时间戳：版本号不一定是 YYYY-MM-DD 形式
+          SOURCE_DATE_EPOCH=$(git -C "$OUT/src" log -1 --format=%ct)
+          export SOURCE_DATE_EPOCH
+
           find "$OUT" -name .git -type d -prune -exec rm -rf {} +
 
-          SOURCE_DATE_EPOCH=$(date -u -d "${SING_BOX_VERSION}T00:00:00Z" +%s)
-          export SOURCE_DATE_EPOCH
           tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" \
             --numeric-owner --owner=0 --group=0 -cf src.tmp.tar "$OUT"
           gzip -n -9 src.tmp.tar
@@ -71,6 +72,7 @@ jobs:
           mv src.tmp.tar.gz "$TARBALL"
           echo "PKG_HASH=$(sha256sum "$TARBALL" | cut -d' ' -f1)" >> "$GITHUB_ENV"
           echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+          echo "SRC_ID=$SRC_ID" >> "$GITHUB_ENV"
 
       - name: Publish to sing-box-src release
         env:
