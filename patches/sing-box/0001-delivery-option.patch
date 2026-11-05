@@ -476,3 +476,31 @@ index 2b0618b..b03a51c 100644
  	})
  	if err != nil {
  		return err
+diff --git a/protocol/ebpf/interface_topology.go b/protocol/ebpf/interface_topology.go
+index 4781da9..d231daa 100644
+--- a/protocol/ebpf/interface_topology.go
++++ b/protocol/ebpf/interface_topology.go
+@@ -17,7 +17,22 @@ func (i *Inbound) repairTCInfrastructure() (bool, error) {
+ 	if i.tcDataPlane == nil {
+ 		return false, nil
+ 	}
+-	return i.tcDataPlane.RepairInfrastructure()
++	changed, err := i.tcDataPlane.RepairInfrastructure()
++	routingChanged, deliveryChanged := i.tcDataPlane.LastRepair()
++	namespacePath := ""
++	i.tcNamespaceAccess.RLock()
++	if i.tcNamespace != nil {
++		namespacePath = i.tcNamespace.Path()
++	}
++	i.tcNamespaceAccess.RUnlock()
++	i.logger.Debug("eBPF ", ebpfStructuredEvent("tc_repair", map[string]any{
++		"changed":          changed,
++		"routing_changed":  routingChanged,
++		"delivery_changed": deliveryChanged,
++		"namespace_path":   namespacePath,
++		"namespace_owned":  namespacePath != "",
++	}))
++	return changed, err
+ }
+ 
+ func (i *Inbound) monitoredDefaultInterfaceName() string {

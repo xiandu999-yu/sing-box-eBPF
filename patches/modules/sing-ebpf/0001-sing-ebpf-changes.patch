@@ -920,10 +920,19 @@ index aaaf88f..ffcbe86 100644
 +
  char _license[] SEC("license") = "GPL";
 diff --git a/runtime/api.go b/runtime/api.go
-index e21cb55..d51c68a 100644
+index e21cb55..339b838 100644
 --- a/runtime/api.go
 +++ b/runtime/api.go
-@@ -155,6 +155,10 @@ func (d *tcDataPlane) TCDiagnostics() core.TCDiagnostics {
+@@ -45,6 +45,8 @@ type TCRuntime interface {
+ 	Reconcile(localInterface string, sharedInterfaces []string, hostAddresses []netip.Addr) error
+ 	HealthCheck(localInterface string, sharedInterfaces []string, hostAddresses []netip.Addr) (bool, error)
+ 	RepairInfrastructure() (bool, error)
++	// LastRepair reports which half of the previous repair pass changed.
++	LastRepair() (routing bool, delivery bool)
+ 	AttachmentStateChanged(localInterface string, sharedInterfaces []string) (bool, error)
+ 	AttachmentDescriptions() []string
+ 	AttachmentDiagnostics() []core.AttachmentInfo
+@@ -155,6 +157,10 @@ func (d *tcDataPlane) TCDiagnostics() core.TCDiagnostics {
  		info.RoutingPriority = d.routing.priority
  		info.RoutingSlot = d.routing.slot
  	}
@@ -934,13 +943,28 @@ index e21cb55..d51c68a 100644
  	mode := ""
  	for _, attachment := range d.attachments {
  		if attachment.attachmentType == "" {
-@@ -180,6 +184,7 @@ func (d *tcDataPlane) TCDiagnostics() core.TCDiagnostics {
+@@ -180,6 +186,7 @@ func (d *tcDataPlane) TCDiagnostics() core.TCDiagnostics {
  		RetiredAttachmentCount: len(d.retiredAttachments),
  		RetiredDeliveryCount:   len(d.retiredDeliveries),
  		Priority:               d.priority,
 +		DeliveryKind:           deliveryKind,
  		RequiresRebuild:        requiresRebuild,
  	}
+ }
+@@ -192,6 +199,14 @@ func (d *tcDataPlane) HealthCheck(localInterface string, sharedInterfaces []stri
+ 	return d.healthCheck(localInterface, sharedInterfaces, hostAddresses)
+ }
+ 
++// LastRepair reports which half of the previous RepairInfrastructure pass
++// asked for a change. Diagnostics-only probe.
++func (d *tcDataPlane) LastRepair() (routing bool, delivery bool) {
++	d.access.Lock()
++	defer d.access.Unlock()
++	return d.lastRoutingChanged, d.lastDeliveryChanged
++}
++
+ func (d *tcDataPlane) RepairInfrastructure() (bool, error) {
+ 	return d.repairInfrastructure()
  }
 diff --git a/runtime/core_access.go b/runtime/core_access.go
 index b469b01..4bbc333 100644
@@ -954,7 +978,7 @@ index b469b01..4bbc333 100644
 +// coreAttachTCXPositioned is the positioned variant used by head/tail.
 +var coreAttachTCXPositioned = core.AttachTCXPositioned
 diff --git a/runtime/tc_dataplane.go b/runtime/tc_dataplane.go
-index 31d06ac..8fc04be 100644
+index 31d06ac..8d1bb27 100644
 --- a/runtime/tc_dataplane.go
 +++ b/runtime/tc_dataplane.go
 @@ -29,6 +29,7 @@ const (
@@ -988,7 +1012,18 @@ index 31d06ac..8fc04be 100644
  	routing               *tcPolicyRouting
  	delivery              *tcDeliveryLink
  	attachments           []*tcInterfaceAttachment
-@@ -211,6 +218,9 @@ func startTCDataPlane(
+@@ -139,6 +146,10 @@ type tcDataPlane struct {
+ 	// interfaces, which is the only way to reach the ordering between releasing
+ 	// an attachment and taking the interface lock of the one that replaced it.
+ 	hooks *tcDataPlaneHooks
++	// Probe fields: which half of RepairInfrastructure actually reported a
++	// change. Diagnostics-only; they are not part of the data path.
++	lastRoutingChanged  bool
++	lastDeliveryChanged bool
+ }
+ 
+ func (d *tcDataPlane) retainRetiredAttachment(attachment *tcInterfaceAttachment) {
+@@ -211,6 +222,9 @@ func startTCDataPlane(
  	namespace *TCNamespace,
  ) (*tcDataPlane, error) {
  	dataPlane := &tcDataPlane{backend: backend, sharedSourceMACPolicy: sharedSourceMACPolicy, priority: priority}
@@ -998,7 +1033,7 @@ index 31d06ac..8fc04be 100644
  	dataPlane.namespace = namespace
  	dataPlane.enableIPv6 = enableIPv6
  	cleanup := func(startErr error) (*tcDataPlane, error) {
-@@ -525,6 +535,36 @@ func (a *tcInterfaceAttachment) attachSlotFilter(
+@@ -525,6 +539,36 @@ func (a *tcInterfaceAttachment) attachSlotFilter(
  	return attachFilter(link, identity.parent, programFD, identity.name, identity.handle, priority)
  }
  
@@ -1035,7 +1070,7 @@ index 31d06ac..8fc04be 100644
  func tcxUnsupportedError(err error) bool {
  	return err != nil && (errors.Is(err, CiliumEBPF.ErrNotSupported) ||
  		errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS) ||
-@@ -557,7 +597,8 @@ func attachTCXInterface(linkDevice netlink.Link, backend *commonEBPF.TCBackend,
+@@ -557,7 +601,8 @@ func attachTCXInterface(linkDevice netlink.Link, backend *commonEBPF.TCBackend,
  			continue
  		}
  		mainLink, icmpLink, err := attachTCXProgramPair(
@@ -1045,7 +1080,7 @@ index 31d06ac..8fc04be 100644
  		)
  		if err != nil {
  			return closeLinks(err)
-@@ -575,12 +616,13 @@ func attachTCXProgramPair(
+@@ -575,12 +620,13 @@ func attachTCXProgramPair(
  	icmpProgram *CiliumEBPF.Program,
  	icmpEnabled bool,
  	role string,
@@ -1060,7 +1095,7 @@ index 31d06ac..8fc04be 100644
  	if err != nil {
  		return nil, nil, err
  	}
-@@ -590,7 +632,7 @@ func attachTCXProgramPair(
+@@ -590,7 +636,7 @@ func attachTCXProgramPair(
  	if icmpProgram == nil {
  		return nil, nil, E.Errors(E.New("icmp_echo_reply ", role, " reply program is unavailable"), mainLink.Close())
  	}
@@ -1069,7 +1104,7 @@ index 31d06ac..8fc04be 100644
  	if err != nil {
  		return nil, nil, E.Errors(err, mainLink.Close())
  	}
-@@ -782,7 +824,7 @@ func updateTCXInterfaceAttachment(
+@@ -782,7 +828,7 @@ func updateTCXInterfaceAttachment(
  		added := false
  		if attached == nil {
  			var err error
@@ -1078,7 +1113,7 @@ index 31d06ac..8fc04be 100644
  			if err != nil {
  				return err
  			}
-@@ -815,7 +857,7 @@ func updateTCXInterfaceAttachment(
+@@ -815,7 +861,7 @@ func updateTCXInterfaceAttachment(
  				}
  				return startErr
  			}
@@ -1694,3 +1729,15 @@ index 0000000..4dce9d9
 +	}
 +	return nil
 +}
+diff --git a/runtime/tc_reconcile.go b/runtime/tc_reconcile.go
+index ea3e0fa..b5e84d3 100644
+--- a/runtime/tc_reconcile.go
++++ b/runtime/tc_reconcile.go
+@@ -538,6 +538,7 @@ func (d *tcDataPlane) repairInfrastructure() (bool, error) {
+ 		d.replyMTU, d.delivery.replyMTU = mtu, mtu
+ 	}
+ 	deliveryChanged, replaceDelivery, err := d.delivery.repair(d.backend, d.priority)
++	d.lastRoutingChanged, d.lastDeliveryChanged = routingChanged, deliveryChanged
+ 	if err != nil {
+ 		return routingChanged || deliveryChanged, E.Errors(routingErr, err)
+ 	}
