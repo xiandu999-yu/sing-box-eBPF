@@ -5,7 +5,7 @@ name: Build
 #   * OpenWrt 安装包：.ipk / .apk
 #
 # 流程分两段：
-#   prepare —— 下载 sing-box-src release 里的源码包，取 sing-box/src 打成 prepared-src
+#   prepare —— 下载 sing-box-src release 里的源码包，把 src 和 module 打成 prepared-src
 #   build   —— 下载 prepared-src 直接编译
 #
 # 补丁、sing-ebpf 模块、预编译 eBPF 对象都已经封在那份源码包里：
@@ -160,7 +160,9 @@ jobs:
             --pattern "${tarball}" --dir .
           tar -xzf "${tarball}"
           [ -d sing-box/src ] || { echo "::error::sing-box/src missing in ${tarball}"; exit 1; }
-          tar -czf prepared-src.tgz -C sing-box src
+          [ -d sing-box/module ] || { echo "::error::sing-box/module missing in ${tarball}"; exit 1; }
+          # src/go.mod 里是 replace => ../module，两个目录必须一起打包、保持同级
+          tar -czf prepared-src.tgz -C sing-box src module
           ls -lh prepared-src.tgz
 
       - name: Upload prepared source
