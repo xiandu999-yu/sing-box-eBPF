@@ -60,7 +60,7 @@ index 0000000..0ef39f6
 +          if-no-files-found: error
 +          retention-days: 7
 diff --git a/api.go b/api.go
-index 9587bf5..a1c0aa9 100644
+index 8600b25..b4592dc 100644
 --- a/api.go
 +++ b/api.go
 @@ -216,6 +216,13 @@ type CgroupConfig struct {
@@ -238,20 +238,10 @@ index f7d81ab..11dd2b8 100644
  
  func DefaultCgroupMapCapacity() CgroupMapCapacity {
 diff --git a/internal/core/cgroup_backend.go b/internal/core/cgroup_backend.go
-index 7f84ed4..4ffeae7 100644
+index 9a78ac7..1789210 100644
 --- a/internal/core/cgroup_backend.go
 +++ b/internal/core/cgroup_backend.go
-@@ -130,6 +130,9 @@ type CgroupBackend struct {
- 	hostIPv6MapFD           int
- 	bypassIPv4CIDR          []netip.Prefix
- 	bypassIPv6CIDR          []netip.Prefix
-+	bypassProcess           []string
-+	ownerTGID               uint32
-+	markerOnly              bool
- 	hostIPv4                []netip.Prefix
- 	hostIPv6                []netip.Prefix
- 	cgroupPath              string
-@@ -171,14 +174,16 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -168,14 +168,16 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  			return nil, err
  		}
  	}
@@ -276,7 +266,7 @@ index 7f84ed4..4ffeae7 100644
  	}
  	udpTimeoutSeconds := uint32(0)
  	if config.EnableUDP {
-@@ -241,12 +246,17 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -238,12 +240,17 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  	socketReleaseSupported := false
  	skStorage := false
  	coarseTimeSupported := false
@@ -297,7 +287,7 @@ index 7f84ed4..4ffeae7 100644
  		}
  	}
  	if socketReleaseSupported &&
-@@ -293,6 +303,14 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -290,6 +297,14 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  		}
  		return nil, err
  	}
@@ -312,7 +302,7 @@ index 7f84ed4..4ffeae7 100644
  	backend := &CgroupBackend{
  		mapCapacity:         mapCapacity,
  		runtime:             runtimeState,
-@@ -315,6 +333,9 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -312,6 +327,9 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  		udpTimeoutSeconds:   udpTimeoutSeconds,
  		bypassIPv4CIDR:      slices.Clone(policy.localInitialBypass.ipv4),
  		bypassIPv6CIDR:      slices.Clone(policy.localInitialBypass.ipv6),
@@ -335,7 +325,7 @@ index aee060c..4c6360f 100644
  		"cgroup_host_ipv6":         {name: "sb_cg_host6", mapType: CiliumEBPF.Hash, maxEntries: maxHostAddressPolicyEntries, flags: bpfFlagNoPrealloc},
  		"cgroup_udp_release_watch": {
 diff --git a/internal/core/cgroup_maps_test.go b/internal/core/cgroup_maps_test.go
-index e1b4244..8c512b1 100644
+index 2f3b5d9..fb23c6b 100644
 --- a/internal/core/cgroup_maps_test.go
 +++ b/internal/core/cgroup_maps_test.go
 @@ -11,12 +11,15 @@ import (
@@ -657,10 +647,10 @@ index 0000000..80d573b
 +	return key, nil
 +}
 diff --git a/internal/core/tc.go b/internal/core/tc.go
-index 35c4655..a1ab038 100644
+index b6321e4..f9a608e 100644
 --- a/internal/core/tc.go
 +++ b/internal/core/tc.go
-@@ -102,6 +102,13 @@ type TCConfig struct {
+@@ -101,6 +101,13 @@ type TCConfig struct {
  	EnableTCP          bool
  	EnableUDP          bool
  	DeliveryInterface  uint32
@@ -674,27 +664,27 @@ index 35c4655..a1ab038 100644
  	Policy             CompiledPolicy
  	RoutingMark        uint32
  	SelfBypassMap      *CiliumEBPF.Map
-@@ -227,6 +234,9 @@ type TCBackend struct {
- 	tcpListenerMap            bool
- 	programsExposed           bool
- 	control                   tcControl
+@@ -168,6 +175,9 @@ type TCBackend struct {
+ 	tcpListenerMap   bool
+ 	programsExposed  bool
+ 	control          tcControl
 +	delivery                  string
 +	tcxPosition               string
 +	tcxPriority               uint16
- 	controlMapFD              int
- 	assignmentMapFD           int
- 	assignmentCapacity        uint32
-@@ -375,6 +385,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
+ 	controlMapFD     int
+ 	flowStore        tcFlowStore
+ 	selfMapExternal  bool
+@@ -306,6 +316,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
  		controlValue.Flags |= tcFlagSharedBypassIPv6
  	}
  	backend := &TCBackend{
 +		delivery:           config.Delivery,
 +		tcxPosition:        config.TCXPosition,
 +		tcxPriority:        config.TCXPriority,
- 		runtime:            &tcRuntime{maps: maps, programs: loadedPrograms},
- 		tcpListenerMap:     config.EnableTCP && !legacyTCP,
- 		control:            controlValue,
-@@ -1281,6 +1294,14 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
+ 		runtime:        &tcRuntime{maps: maps, programs: loadedPrograms},
+ 		tcpListenerMap: config.EnableTCP && !legacyTCP,
+ 		control:        controlValue,
+@@ -968,6 +981,14 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
  func (b *TCBackend) DeliveryIngressProgramFD() int { return b.programFD(tcProgramDeliveryIngress) }
  func (b *TCBackend) IsolatedReturnProgramFD() int  { return b.programFD(tcProgramIsolatedReturn) }
  
@@ -709,6 +699,21 @@ index 35c4655..a1ab038 100644
  func (b *TCBackend) programFD(index int) int {
  	if b == nil {
  		return -1
+diff --git a/internal/core/tc_return.go b/internal/core/tc_return.go
+index 3b0daeb..c652629 100644
+--- a/internal/core/tc_return.go
++++ b/internal/core/tc_return.go
+@@ -93,7 +93,9 @@ func (b *TCBackend) AcquireReturnRoute(protocol uint8, source, destination netip
+ 		return TCReturnHandle{}, unix.ENOENT
+ 	}
+ 	if value.NetworkGeneration&tcReturnRetiring != 0 {
+-		return TCReturnHandle{}, E.New("TC return route is retiring")
++		return TCReturnHandle{}, E.New("TC return route is retiring (entry_generation=",
++			value.NetworkGeneration, " control_generation=", b.control.NetworkGeneration,
++			" last_seen_ns=", value.LastSeenNS)
+ 	}
+ 	return b.retainReturnRouteLocked(key, value), nil
+ }
 diff --git a/internal/core/tcx_order.go b/internal/core/tcx_order.go
 index 86c87a4..9992805 100644
 --- a/internal/core/tcx_order.go
@@ -1752,10 +1757,10 @@ index 0000000..4dce9d9
 +	return nil
 +}
 diff --git a/runtime/tc_reconcile.go b/runtime/tc_reconcile.go
-index ea3e0fa..b5e84d3 100644
+index cf2b554..48a5329 100644
 --- a/runtime/tc_reconcile.go
 +++ b/runtime/tc_reconcile.go
-@@ -538,6 +538,7 @@ func (d *tcDataPlane) repairInfrastructure() (bool, error) {
+@@ -569,6 +569,7 @@ func (d *tcDataPlane) repairInfrastructure() (bool, error) {
  		d.replyMTU, d.delivery.replyMTU = mtu, mtu
  	}
  	deliveryChanged, replaceDelivery, err := d.delivery.repair(d.backend, d.priority)
