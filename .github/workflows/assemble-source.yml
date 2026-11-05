@@ -1,0 +1,116 @@
+name: Assemble sing-box source
+
+# 把 sing-box 固定点 + sing-ebpf 模块 + 两份补丁组装成一个源码 tarball，
+# 发布到 sing-box-src release，并把 PKG_SOURCE / PKG_HASH 写回
+# openwrt/sing-box/Makefile。OpenWrt 侧只消费这份 tarball。
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: assemble-source
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Load pins
+        run: grep -E '^[A-Z]' ci/pins.env | tr -d '\r' >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.27.3"
+
+      - name: Assemble source tree
+        run: |
+          set -eux
+          OUT="sing-box"
+          rm -rf "$OUT"; mkdir -p "$OUT"
+
+          fetch_at() {
+            git clone -q --filter=blob:none --no-checkout "$1" "$2"
+            git -C "$2" checkout -q "$3"
+          }
+
+          fetch_at "https://github.com/${SING_BOX_REPOSITORY}" "$OUT/src" "$SING_BOX_COMMIT"
+          fetch_at "https://github.com/${MODULE_REPOSITORY}" "$OUT/module" "$MODULE_COMMIT"
+
+          # sing-box 补丁（delivery 选项、TCX、clashapi 进程名）
+          if ls patches/sing-box/*.patch >/dev/null 2>&1; then
+            git -C "$OUT/src" apply --whitespace=nowarn "$GITHUB_WORKSPACE"/patches/sing-box/*.patch
+          fi
+
+          # 模块补丁（pname 旁路、netkit-L3 等；目前模块侧改动在 fork 里，
+          # 等这些改动补丁化之后，这里会多一步 apply）
+          if ls patches/modules/sing-ebpf/*.patch >/dev/null 2>&1; then
+            git -C "$OUT/module" apply --whitespace=nowarn "$GITHUB_WORKSPACE"/patches/modules/sing-ebpf/*.patch
+          fi
+
+          ( cd "$OUT/src" \
+              && go mod edit -replace "${MODULE_PATH}=../module" \
+              && go mod tidy )
+
+          find "$OUT" -name .git -type d -prune -exec rm -rf {} +
+
+          SOURCE_DATE_EPOCH=$(date -u -d "${SING_BOX_VERSION}T00:00:00Z" +%s)
+          export SOURCE_DATE_EPOCH
+          tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" \
+            --numeric-owner --owner=0 --group=0 -cf src.tmp.tar "$OUT"
+          gzip -n -9 src.tmp.tar
+          # 内容寻址：同样输入得到同样名字，不同内容不会覆盖旧资产
+          SRC_ID=$(sha256sum src.tmp.tar.gz | cut -c1-12)
+          TARBALL="sing-box-src-${SING_BOX_VERSION}-${SRC_ID}.tar.gz"
+          mv src.tmp.tar.gz "$TARBALL"
+          echo "PKG_HASH=$(sha256sum "$TARBALL" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+
+      - name: Publish to sing-box-src release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh release view sing-box-src --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create sing-box-src --repo "${{ github.repository }}" \
+              --title "sing-box pinned source" \
+              --notes "组装好的 sing-box + sing-ebpf 源码包；内容寻址，旧资产不会被覆盖。" \
+              --latest=false
+          if gh release view sing-box-src --repo "${{ github.repository }}" \
+               --json assets --jq '.assets[].name' | grep -qx "$TARBALL"; then
+            echo "asset already present: $TARBALL"
+          else
+            gh release upload sing-box-src "$TARBALL" --repo "${{ github.repository }}"
+          fi
+
+      - name: Write PKG_SOURCE into Makefile and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          MK=openwrt/sing-box/Makefile
+          cur_ver=$(sed -n 's/^PKG_VERSION:=//p' "$MK")
+          cur_rel=$(sed -n 's/^PKG_RELEASE:=//p' "$MK")
+          if [ "$cur_ver" = "${SING_BOX_VERSION}" ] && grep -qx "PKG_SOURCE:=${TARBALL}" "$MK"; then
+            echo "no change"; exit 0
+          fi
+          if [ "$cur_ver" = "${SING_BOX_VERSION}" ]; then
+            rel=$((cur_rel + 1))
+          else
+            rel=1
+          fi
+          sed -i "s|^PKG_VERSION:=.*|PKG_VERSION:=${SING_BOX_VERSION}|" "$MK"
+          sed -i "s|^PKG_RELEASE:=.*|PKG_RELEASE:=${rel}|" "$MK"
+          sed -i "s|^PKG_SOURCE:=.*|PKG_SOURCE:=${TARBALL}|" "$MK"
+          sed -i "s|^PKG_HASH:=.*|PKG_HASH:=${PKG_HASH}|" "$MK"
+          git config user.email ci@local
+          git config user.name ci
+          git add "$MK"
+          git commit -m "chore(source): sing-box ${SING_BOX_VERSION} ${SRC_ID}"
+          git push

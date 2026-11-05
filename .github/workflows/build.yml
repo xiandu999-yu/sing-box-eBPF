@@ -1,21 +1,16 @@
 name: Build
 
-# 拉取 sing-box.commit 里固定的 commit 并编译：
-#   * CLI 二进制压缩包：仅 Linux（eBPF 只在 Linux 上可用，macOS/Windows 不再构建）
+# 从 assemble-source 产出的源码包编译：
+#   * CLI 二进制压缩包：仅 Linux（eBPF 只在 Linux 上可用）
 #   * OpenWrt 安装包：.ipk / .apk
 #
 # 流程分两段：
-#   prepare —— 克隆源码、套补丁、按 pin.env 把依赖模块指向 fork，打包成 prepared-src
-#   build   —— 下载 prepared-src 直接编译，不再各自打补丁
+#   prepare —— 下载 sing-box-src release 里的源码包，取 sing-box/src 打成 prepared-src
+#   build   —— 下载 prepared-src 直接编译
 #
-# 依赖模块（如 sing-ebpf）的改动和生成好的 eBPF 对象都提交在 fork 里，
-# 构建时只做 go.mod replace，不再克隆模块、也不再现场生成对象。
-#
-# 补丁目录：
-#   patches/sing-box/*.patch        -> sing-box 本体（patches/*.patch 仍兼容）
-#   patches/modules/<name>/pin.env  -> 依赖模块的 fork + commit
-#   patches/modules/<name>/*.patch  -> 仍支持传统方式（打补丁 + 本地 replace）
-# 具体逻辑见 .github/scripts/apply-patches.sh，补丁说明见 patches/CHANGES.md。
+# 补丁、sing-ebpf 模块、预编译 eBPF 对象都已经封在那份源码包里：
+#   .github/workflows/assemble-source.yml 负责组装，固定点见 ci/pins.env。
+# 补丁说明见 patches/CHANGES.md。
 
 on:
   workflow_dispatch:
@@ -56,21 +51,22 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       repository: ${{ steps.pin.outputs.repository }}
       commit: ${{ steps.pin.outputs.commit }}
+      pinned_version: ${{ steps.pin.outputs.version }}
     steps:
       - uses: actions/checkout@v6
 
-      - name: Read sing-box.commit
+      - name: Read ci/pins.env
         id: pin
         shell: bash
         run: |
           set -euo pipefail
           set -a
           # tr -d '\r' 防止在 Windows 上编辑过该文件后带进 CRLF
-          source <(tr -d '\r' < ./sing-box.commit)
+          source <(tr -d '\r' < ./ci/pins.env)
           set +a
-          for name in SING_BOX_REPOSITORY SING_BOX_COMMIT; do
+          for name in SING_BOX_REPOSITORY SING_BOX_COMMIT SING_BOX_VERSION; do
             if [ -z "${!name:-}" ]; then
-              echo "::error::sing-box.commit is missing ${name}"
+              echo "::error::ci/pins.env is missing ${name}"
               exit 1
             fi
           done
@@ -81,32 +77,21 @@ jobs:
           {
             echo "repository=${SING_BOX_REPOSITORY}"
             echo "commit=${SING_BOX_COMMIT}"
+            echo "version=${SING_BOX_VERSION}"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Checkout sing-box
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ steps.pin.outputs.repository }}
-          ref: ${{ steps.pin.outputs.commit }}
-          path: src
-          fetch-depth: 0
 
       - name: Resolve version
         id: resolve
         shell: bash
         run: |
           set -euo pipefail
-          cd src
           override="${{ inputs.version }}"
-          if [ -n "${override}" ]; then
-            raw="${override#v}"
-          else
-            tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
-            raw="${tag#v}"
-            [ -n "${raw}" ] || raw="0.0.0"
-          fi
+          pinned="${{ needs.version.outputs.pinned_version }}"
+          raw="${override:-${pinned}}"
+          raw="${raw#v}"
+          [ -n "${raw}" ] || { echo "::error::no version: set SING_BOX_VERSION in ci/pins.env"; exit 1; }
           # 和上游一样只用「发布版本」：数字主干 + 标准预发布后缀。
-          # fork 的 -reF1nd 这类装饰性后缀会丢掉，否则 apk 打包会因为
+          # fork 的 -reF1nd / -mod 这类装饰性后缀会丢掉，否则 apk 打包会因为
           # 版本语法不合法而失败（apk 只认 1.2.3、1.2.3_alpha1、1.2.3-r1）。
           core="$(printf '%s' "${raw}" | sed -E 's/^([0-9]+(\.[0-9]+)*).*/\1/')"
           pre="$(printf '%s' "${raw}" | sed -nE 's/^[0-9]+(\.[0-9]+)*-((alpha|beta|pre|rc)[.-]?[0-9]*).*/\2/p')"
@@ -123,7 +108,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "sing-box (reF1nd eBPF fork)"
+            echo "sing-box (CHIZI-0618 eBPF fork)"
             echo "repository:  ${{ steps.pin.outputs.repository }}"
             echo "commit:      ${{ steps.pin.outputs.commit }}"
             echo "version:     ${{ steps.resolve.outputs.version }}"
@@ -151,57 +136,31 @@ jobs:
           path: build-info.txt
           retention-days: 7
 
-  # 唯一的「准备」阶段：套补丁 + 生成 eBPF 对象 + 打包，供后续 job 复用
+  # 唯一的「准备」阶段：取 assemble-source 产出的源码包，供后续 job 复用。
+  # 补丁、模块、预编译对象都已经在那份 tarball 里，这里不再打补丁。
   prepare:
     name: Prepare source
     runs-on: ubuntu-26.04
-    timeout-minutes: 40
+    timeout-minutes: 20
     needs:
       - version
     steps:
       - uses: actions/checkout@v6
 
-      - name: Checkout sing-box
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ needs.version.outputs.repository }}
-          ref: ${{ needs.version.outputs.commit }}
-          path: src
-          fetch-depth: 1
-
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: src/go.mod
-          cache: true
-          cache-dependency-path: src/go.sum
-
-      # 防止补丁放错目录时静默跳过，导致用原版代码构建
-      - name: Verify patches present
+      - name: Download assembled source
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          box=$(find patches/sing-box -name '*.patch' 2>/dev/null | wc -l)
-          mod=$(find patches/modules -name '*.patch' 2>/dev/null | wc -l)
-          pins=$(find patches/modules -name 'pin.env' 2>/dev/null | wc -l)
-          echo "sing-box patches: ${box}, module patches: ${mod}, module pins: ${pins}"
-          [ "${box}" -gt 0 ] || { echo "::error::no sing-box patch found under patches/sing-box"; exit 1; }
-          if [ "${mod}" -eq 0 ] && [ "${pins}" -eq 0 ]; then
-            echo "::error::no module patch and no module pin under patches/modules"
-            exit 1
-          fi
-
-      - name: Apply patches
-        shell: bash
-        run: |
-          sed -i 's/\r$//' .github/scripts/apply-patches.sh
-          bash .github/scripts/apply-patches.sh src
-
-      - name: Pack prepared source
-        shell: bash
-        run: |
-          set -euo pipefail
-          tar -czf prepared-src.tgz src
+          tarball=$(sed -n 's/^PKG_SOURCE:=//p' openwrt/sing-box/Makefile)
+          [ -n "${tarball}" ] || { echo "::error::PKG_SOURCE is empty in openwrt/sing-box/Makefile"; exit 1; }
+          echo "tarball: ${tarball}"
+          gh release download sing-box-src --repo "${{ github.repository }}" \
+            --pattern "${tarball}" --dir .
+          tar -xzf "${tarball}"
+          [ -d sing-box/src ] || { echo "::error::sing-box/src missing in ${tarball}"; exit 1; }
+          tar -czf prepared-src.tgz -C sing-box src
           ls -lh prepared-src.tgz
 
       - name: Upload prepared source
