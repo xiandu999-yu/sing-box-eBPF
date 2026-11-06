@@ -127,10 +127,10 @@ index 3da9dc6..0a379a7 100644
  		"upload":      c.Upload.Load(),
  		"download":    c.Download.Load(),
 diff --git a/option/ebpf.go b/option/ebpf.go
-index fb2474a..2d3e755 100644
+index fb2474a..eba3087 100644
 --- a/option/ebpf.go
 +++ b/option/ebpf.go
-@@ -26,13 +26,34 @@ type EBPFInboundOptions struct {
+@@ -26,30 +26,55 @@ type EBPFInboundOptions struct {
  	FakeIPICMP string `json:"fakeip_icmp,omitempty" enum:"off,reply"`
  }
  
@@ -146,29 +146,59 @@ index fb2474a..2d3e755 100644
 +}
 +
  type EBPFLocalOptions struct {
- 	Enabled              *bool                            `json:"enabled,omitempty"`
- 	DNSMode              string                           `json:"dns_mode,omitempty" enum:"hijack,respect_policy,off"`
- 	DataPlane            string                           `json:"data_plane,omitempty" enum:"cgroup,socket_assign"`
+-	Enabled              *bool                            `json:"enabled,omitempty"`
+-	DNSMode              string                           `json:"dns_mode,omitempty" enum:"hijack,respect_policy,off"`
+-	DataPlane            string                           `json:"data_plane,omitempty" enum:"cgroup,socket_assign"`
+-	CgroupPath           string                           `json:"cgroup_path,omitempty"`
+-	IPv6                 *bool                            `json:"ipv6,omitempty"`
+-	BypassPrivateAddress *bool                            `json:"bypass_private_address,omitempty"`
+-	BypassRuleSet        badoption.Listable[string]       `json:"bypass_rule_set,omitempty" reference:"rule_set"`
+-	BypassExclude        badoption.Listable[netip.Prefix] `json:"bypass_exclude,omitempty"`
+-	IncludeUID           badoption.Listable[uint32]       `json:"include_uid,omitempty"`
+-	IncludeUIDRange      badoption.Listable[string]       `json:"include_uid_range,omitempty"`
+-	ExcludeUID           badoption.Listable[uint32]       `json:"exclude_uid,omitempty"`
+-	ExcludeUIDRange      badoption.Listable[string]       `json:"exclude_uid_range,omitempty"`
+-	IncludeAndroidUser   badoption.Listable[int]          `json:"include_android_user,omitempty"`
+-	IncludePackage       badoption.Listable[string]       `json:"include_package,omitempty"`
+-	ExcludePackage       badoption.Listable[string]       `json:"exclude_package,omitempty"`
+-	BypassPort           badoption.Listable[uint16]       `json:"bypass_port,omitempty"`
+-	BypassPortRange      badoption.Listable[string]       `json:"bypass_port_range,omitempty"`
++	Enabled   *bool  `json:"enabled,omitempty"`
++	DNSMode   string `json:"dns_mode,omitempty" enum:"hijack,respect_policy,off"`
++	DataPlane string `json:"data_plane,omitempty" enum:"cgroup,socket_assign"`
 +	// TCXPosition picks the TCX chain end: "head" (default) runs first,
 +	// "tail" runs last. TCXPriority overrides it when non-zero.
-+	TCXPriority          EBPFTCPriority                   `json:"tcx_priority,omitempty"`
-+	TCXPosition          string                           `json:"tcx_position,omitempty" enum:"head,tail"`
- 	CgroupPath           string                           `json:"cgroup_path,omitempty"`
- 	IPv6                 *bool                            `json:"ipv6,omitempty"`
- 	BypassPrivateAddress *bool                            `json:"bypass_private_address,omitempty"`
++	TCXPriority          EBPFTCPriority `json:"tcx_priority,omitempty"`
++	TCXPosition          string         `json:"tcx_position,omitempty" enum:"head,tail"`
++	CgroupPath           string         `json:"cgroup_path,omitempty"`
++	IPv6                 *bool          `json:"ipv6,omitempty"`
++	BypassPrivateAddress *bool          `json:"bypass_private_address,omitempty"`
 +	// BypassProcess lists process names whose traffic is never proxied. The
 +	// name is matched as a prefix against the kernel's task comm, which is the
 +	// executable basename truncated to 15 bytes. Only data_plane=cgroup can
 +	// evaluate it, because the match runs in the caller's context, before any
 +	// DNS or port selector.
-+	BypassProcess        badoption.Listable[string]       `json:"bypass_process,omitempty"`
- 	BypassRuleSet        badoption.Listable[string]       `json:"bypass_rule_set,omitempty" reference:"rule_set"`
- 	BypassExclude        badoption.Listable[netip.Prefix] `json:"bypass_exclude,omitempty"`
- 	IncludeUID           badoption.Listable[uint32]       `json:"include_uid,omitempty"`
-@@ -50,6 +71,10 @@ type EBPFSharedOptions struct {
- 	Enabled              *bool                            `json:"enabled,omitempty"`
- 	DefaultInterface     bool                             `json:"default_interface,omitempty"`
- 	DataPlane            string                           `json:"data_plane,omitempty" enum:"socket_assign,packet_rewrite"`
++	BypassProcess      badoption.Listable[string]       `json:"bypass_process,omitempty"`
++	BypassRuleSet      badoption.Listable[string]       `json:"bypass_rule_set,omitempty" reference:"rule_set"`
++	BypassExclude      badoption.Listable[netip.Prefix] `json:"bypass_exclude,omitempty"`
++	IncludeUID         badoption.Listable[uint32]       `json:"include_uid,omitempty"`
++	IncludeUIDRange    badoption.Listable[string]       `json:"include_uid_range,omitempty"`
++	ExcludeUID         badoption.Listable[uint32]       `json:"exclude_uid,omitempty"`
++	ExcludeUIDRange    badoption.Listable[string]       `json:"exclude_uid_range,omitempty"`
++	IncludeAndroidUser badoption.Listable[int]          `json:"include_android_user,omitempty"`
++	IncludePackage     badoption.Listable[string]       `json:"include_package,omitempty"`
++	ExcludePackage     badoption.Listable[string]       `json:"exclude_package,omitempty"`
++	BypassPort         badoption.Listable[uint16]       `json:"bypass_port,omitempty"`
++	BypassPortRange    badoption.Listable[string]       `json:"bypass_port_range,omitempty"`
+ }
+ 
+ type EBPFSharedOptions struct {
+-	Enabled              *bool                            `json:"enabled,omitempty"`
+-	DefaultInterface     bool                             `json:"default_interface,omitempty"`
+-	DataPlane            string                           `json:"data_plane,omitempty" enum:"socket_assign,packet_rewrite"`
++	Enabled          *bool  `json:"enabled,omitempty"`
++	DefaultInterface bool   `json:"default_interface,omitempty"`
++	DataPlane        string `json:"data_plane,omitempty" enum:"socket_assign,packet_rewrite"`
 +	// TCXPosition picks the TCX chain end: "head" (default) runs first,
 +	// "tail" runs last. TCXPriority overrides it when non-zero.
 +	TCXPriority          EBPFTCPriority                   `json:"tcx_priority,omitempty"`
@@ -221,10 +251,10 @@ index b9bb3b2..191d830 100644
  	TCRoutingTable                int        `json:"tc_routing_table,omitempty"`
  	TCRoutingPriority             int        `json:"tc_routing_priority,omitempty"`
 diff --git a/protocol/ebpf/diagnostics_render.go b/protocol/ebpf/diagnostics_render.go
-index 9e03068..4939188 100644
+index dd0235d..39d8756 100644
 --- a/protocol/ebpf/diagnostics_render.go
 +++ b/protocol/ebpf/diagnostics_render.go
-@@ -167,6 +167,9 @@ func (i *Inbound) logStartupSummary() {
+@@ -173,6 +173,9 @@ func (i *Inbound) logStartupSummaryLocked() {
  		}
  	}
  
@@ -234,7 +264,7 @@ index 9e03068..4939188 100644
  	i.logger.Info("eBPF ", ebpfStructuredEvent("inbound_start", map[string]any{
  		"state":              diagnostics.State,
  		"configured_paths":   paths,
-@@ -174,5 +177,8 @@ func (i *Inbound) logStartupSummary() {
+@@ -180,5 +183,8 @@ func (i *Inbound) logStartupSummaryLocked() {
  		"waiting_paths":      waiting,
  		"waiting_interfaces": waitingInterfaces,
  		"fakeip_icmp":        fakeIPICMPSummary,
@@ -244,10 +274,10 @@ index 9e03068..4939188 100644
  	}))
  }
 diff --git a/protocol/ebpf/diagnostics_snapshot.go b/protocol/ebpf/diagnostics_snapshot.go
-index 8ae2a0a..68fec2f 100644
+index 539434a..bfc99aa 100644
 --- a/protocol/ebpf/diagnostics_snapshot.go
 +++ b/protocol/ebpf/diagnostics_snapshot.go
-@@ -59,6 +59,7 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
+@@ -96,6 +96,7 @@ func (i *Inbound) diagnosticsLocked() EBPFDiagnostics {
  		diagnostics.TCDeliveryInterface = tc.NetworkInfo.DeliveryInterface
  		diagnostics.TCNetworkNamespace = tc.NetworkInfo.Namespace
  		diagnostics.TCDeliveryInterfaceIndex = tc.NetworkInfo.DeliveryInterfaceIndex
@@ -255,30 +285,8 @@ index 8ae2a0a..68fec2f 100644
  		diagnostics.TCRoutingMark = tc.NetworkInfo.RoutingMark
  		diagnostics.TCRoutingTable = tc.NetworkInfo.RoutingTable
  		diagnostics.TCRoutingPriority = tc.NetworkInfo.RoutingPriority
-@@ -257,19 +258,8 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
- 		if drops, err := backend.UDPReleaseNotificationDrops(); err == nil {
- 			diagnostics.UDPNAT.ReleaseNotificationDrops = drops
- 		}
--		readStat := func(stat commonEBPF.CgroupUDPStat) uint64 {
--			value, err := backend.UDPReleaseStat(stat)
--			if err != nil {
--				return 0
--			}
--			return value
--		}
--		diagnostics.UDPNAT.RedirectAdmissionFailures = readStat(commonEBPF.CgroupUDPStatTCPRedirectFailure) + readStat(commonEBPF.CgroupUDPStatUDPRedirectFailure)
--		diagnostics.UDPNAT.UDPTokenAdmissionFailures = readStat(commonEBPF.CgroupUDPStatUDPTokenFailure)
--		diagnostics.UDPNAT.UDPTokenReverseFailures = readStat(commonEBPF.CgroupUDPStatUDPTokenReverseFailure)
--		diagnostics.UDPNAT.UDPPeerAdmissionFailures = readStat(commonEBPF.CgroupUDPStatUDPPeerFailure)
--		diagnostics.UDPNAT.TCPPeerAdmissionFailures = readStat(commonEBPF.CgroupUDPStatTCPPeerFailure)
--		diagnostics.UDPNAT.UDPRecoveryAdmissionFailures = readStat(commonEBPF.CgroupUDPStatUDPRecoveryFailure)
-+		// The per-admission UDP counters (token / peer / recovery) are not in the
-+		// object this tree builds; they are diagnostics-only and stay at zero.
- 	}
- 	diagnostics.UDPReplySockets = i.udpReplySockets.snapshot()
- 
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
-index badcfea..6d955d4 100644
+index 0d5a972..45d1b40 100644
 --- a/protocol/ebpf/inbound.go
 +++ b/protocol/ebpf/inbound.go
 @@ -29,6 +29,11 @@ const (
@@ -293,15 +301,15 @@ index badcfea..6d955d4 100644
  )
  
  var (
-@@ -67,6 +72,7 @@ type Inbound struct {
- 	localDataPlane            string
- 	cgroupPath                string
- 	cgroupBackend             *commonEBPF.CgroupBackend
-+	processMarkers            *commonEBPF.ProcessMarkerBackend
- 	localRoutes               *commonEBPF.LocalRouteSet
- 	redirectIPv4Prefix        netip.Prefix
- 	redirectIPv6Prefix        netip.Prefix
-@@ -100,10 +106,14 @@ type Inbound struct {
+@@ -59,6 +64,7 @@ func RegisterInbound(registry *inbound.Registry) {
+ 
+ type inboundResources struct {
+ 	cgroupBackend          *commonEBPF.CgroupBackend
++	processMarkers         *commonEBPF.ProcessMarkerBackend
+ 	localRoutes            *commonEBPF.LocalRouteSet
+ 	selfBypass             *commonEBPF.SelfBypass
+ 	processTracker         processTrackerOwner
+@@ -163,10 +169,14 @@ type Inbound struct {
  	sharedIPv6                bool
  	sharedBypassPrivate       bool
  	localBypassPort           []portRange
@@ -313,10 +321,10 @@ index badcfea..6d955d4 100644
 +	tcxPriority               uint16
 +	tcxPosition               string
 +	delivery                  string
- 	networkGeneration         uint64
  	fakeIPIPv4Prefix          netip.Prefix
  	fakeIPIPv6Prefix          netip.Prefix
-@@ -285,6 +295,24 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+ 	fakeIPICMPReply           bool
+@@ -293,6 +303,24 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  			return nil, E.New("eBPF self-bypass sockets were not prepared")
  		}
  	}
@@ -341,7 +349,7 @@ index badcfea..6d955d4 100644
  	inbound := &Inbound{
  		Adapter:        inbound.NewAdapter(C.TypeEBPF, tag),
  		ctx:            ctx,
-@@ -311,10 +339,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -321,10 +349,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  		sharedIPv6:          sharedEnabled && enabledByDefault(options.Shared.IPv6),
  		sharedBypassPrivate: options.Shared.BypassPrivateAddress == nil || *options.Shared.BypassPrivateAddress,
  		localBypassPort:     localBypassPort,
@@ -356,7 +364,7 @@ index badcfea..6d955d4 100644
  		sharedIncludeMAC:    sharedIncludeMAC,
  		sharedExcludeMAC:    sharedExcludeMAC,
  		localPolicy: localUIDPolicy{
-@@ -407,3 +439,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
+@@ -419,3 +451,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
  		break
  	}
  }
@@ -412,7 +420,7 @@ index badcfea..6d955d4 100644
 +	return priority, position, nil
 +}
 diff --git a/protocol/ebpf/inbound_connection.go b/protocol/ebpf/inbound_connection.go
-index 81f4e40..e53a01e 100644
+index fd60c7a..63cc440 100644
 --- a/protocol/ebpf/inbound_connection.go
 +++ b/protocol/ebpf/inbound_connection.go
 @@ -8,6 +8,7 @@ import (
@@ -423,7 +431,7 @@ index 81f4e40..e53a01e 100644
  	"strings"
  	"syscall"
  
-@@ -52,6 +53,13 @@ func (i *Inbound) NewConnection(
+@@ -80,6 +81,13 @@ func (i *Inbound) NewConnection(
  		metadata.Source = M.SocksaddrFromNet(conn.RemoteAddr())
  		metadata.Destination = M.SocksaddrFromNetIP(original.Destination)
  		metadata.ProcessInfo = i.lookupProcessInfo(original.SocketCookie)
@@ -468,10 +476,10 @@ index 4781da9..370b8b3 100644
  
  func (i *Inbound) monitoredDefaultInterfaceName() string {
 diff --git a/protocol/ebpf/lifecycle_close.go b/protocol/ebpf/lifecycle_close.go
-index e39453b..a290704 100644
+index 2a52643..18e8e75 100644
 --- a/protocol/ebpf/lifecycle_close.go
 +++ b/protocol/ebpf/lifecycle_close.go
-@@ -89,6 +89,9 @@ func (i *Inbound) closeResources() error {
+@@ -58,6 +58,9 @@ func (i *Inbound) closeResources() error {
  			selfBypassErr = E.New("eBPF self-bypass remained open after close")
  		}
  	}
@@ -482,7 +490,7 @@ index e39453b..a290704 100644
  	if i.processTracker != nil {
  		i.processTracker, processTrackerErr = closeProcessTrackerOwner(i.processTracker)
 diff --git a/protocol/ebpf/lifecycle_resources.go b/protocol/ebpf/lifecycle_resources.go
-index 3564251..0d8c14b 100644
+index 7f06bc5..0eb8cf2 100644
 --- a/protocol/ebpf/lifecycle_resources.go
 +++ b/protocol/ebpf/lifecycle_resources.go
 @@ -29,6 +29,10 @@ func (i *Inbound) prepareCgroupBackend() error {
@@ -497,20 +505,10 @@ index 3564251..0d8c14b 100644
  	if err != nil {
  		return err
 diff --git a/protocol/ebpf/lifecycle_start.go b/protocol/ebpf/lifecycle_start.go
-index ef815c6..ffef4e2 100644
+index e789b39..ba5c835 100644
 --- a/protocol/ebpf/lifecycle_start.go
 +++ b/protocol/ebpf/lifecycle_start.go
-@@ -108,6 +108,9 @@ func (i *Inbound) startInbound() error {
- 	}
- 	backendConfig := commonEBPF.TCConfig{
- 		ListenerPort:      i.tcListeners.selectedPort(),
-+		Delivery:          i.delivery,
-+		TCXPriority:       i.tcxPriority,
-+		TCXPosition:       i.tcxPosition,
- 		EnableLocal:       localSocketAssignEnabled,
- 		EnableShared:      sharedSocketAssignEnabled,
- 		EnableIPv4:        true,
-@@ -188,6 +191,13 @@ func (i *Inbound) startInbound() error {
+@@ -113,6 +113,13 @@ func (i *Inbound) startInbound() error {
  		}
  		i.startCgroupRecoveryScheduler(cgroupBackend)
  		i.startCgroupUDPReleaseReader(cgroupBackend)
@@ -524,7 +522,17 @@ index ef815c6..ffef4e2 100644
  	}
  	if backend != nil {
  		if err = backend.Enable(); err != nil {
-@@ -503,3 +513,25 @@ func combineStartError(startErr error, cleanupErr error) error {
+@@ -254,6 +261,9 @@ func (i *Inbound) startTCDataPlane(
+ ) (*commonEBPF.TCBackend, tcRuntime, error) {
+ 	backendConfig := commonEBPF.TCConfig{
+ 		ListenerPort:      i.tcListeners.selectedPort(),
++		Delivery:          i.delivery,
++		TCXPriority:       i.tcxPriority,
++		TCXPosition:       i.tcxPosition,
+ 		EnableLocal:       localEnabled,
+ 		EnableShared:      sharedEnabled,
+ 		EnableIPv4:        true,
+@@ -531,3 +541,25 @@ func combineStartError(startErr error, cleanupErr error) error {
  	}
  	return E.Errors(startErr, E.Cause(cleanupErr, "cleanup eBPF inbound"))
  }
@@ -551,7 +559,7 @@ index ef815c6..ffef4e2 100644
 +	return err
 +}
 diff --git a/protocol/ebpf/tc_connection.go b/protocol/ebpf/tc_connection.go
-index 7e6175f..6e8c699 100644
+index 2cff9f3..f590dd3 100644
 --- a/protocol/ebpf/tc_connection.go
 +++ b/protocol/ebpf/tc_connection.go
 @@ -8,6 +8,7 @@ import (

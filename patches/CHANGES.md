@@ -8,9 +8,36 @@
 | `sing-box/0001-delivery-option.patch` | `CHIZI-0618/sing-box` | `ci/pins.env` 的 `SING_BOX_COMMIT` |
 | `modules/sing-ebpf/0001-sing-ebpf-changes.patch` | `CHIZI-0618/sing-ebpf` | `ci/pins.env` 的 `MODULE_COMMIT` |
 
-两个补丁都是 `git apply` 套用。模块补丁里含 `internal/bpfgen/*.o` 的二进制段，
-所以组装/编译都不需要 clang，也不需要 `make generate`；只有改动 `native/*.bpf.c`
-时才要先重生成对象、再把新的 `.o` 并进补丁。
+两个补丁都是 `git apply` 套用。模块补丁里**不含二进制**：`make generate` 需要 NDK r29
+的 Clang 21（模块 Makefile 有版本硬校验），所以对象由 `assemble-source` 在 CI 里现场生成；
+只有改 `native/*.bpf.c` 才需要重跑这一步。
+
+---
+
+## 0. 基准：`ed2bdc8`（2026-11-06）
+
+`ci/pins.env` 的 `SING_BOX_COMMIT` 从 `2f42c08`（`refactor(ebpf): isolate maintenance workers`）
+前移到 `ed2bdc8`（`fix(ebpf): register packet listeners after bind`）。上游这一跳把 eBPF inbound
+拆成了三个内嵌结构体，补丁已按新结构重做，不是简单 rebase：
+
+| 上游改动 | 补丁的应对 |
+| --- | --- |
+| `Inbound` 拆成 `inboundResources`（句柄）/ `inboundWorkers`（goroutine 与 WaitGroup）/ `inboundDiagnostics`（计数器与告警限流器） | `processMarkers` 放进 `inboundResources`；`localBypassProcess`、`tcxPriority`、`tcxPosition`、`delivery` 留在 `Inbound` 本体 |
+| 数据面启动拆成 `startCgroupDataPlane` / `startTCDataPlane` / `startSharedRewriteDataPlane` / `startTCListenersIfNeeded` | `delivery` / `tcx_*` 改为在 `startTCDataPlane` 里写进 `TCConfig`；marker-only 钩子挂在 cgroup 数据面之后的分支上 |
+| 监听器移到 `common/listener`，socket 注册改为 bind 成功之后（本 commit 的正文） | 无需改动，属于上游自己的修复 |
+| `lifecycleAccess` 互斥量 + `logStartupSummaryLocked` / `runtimeSnapshotLocked` | 启动日志的三个字段（`delivery` / `delivery_used` / `bypass_process`）跟着搬进新函数 |
+
+`assemble-source` 里加了 **Verify patch anchors** 一步：补丁是行级 diff，上游再把函数挪走时
+照样能"应用成功"，所以逐个断言关键改动还在真正生效的代码上（尤其是缝在
+`repairTCInfrastructure` 里的 `tc_repair` 探针）。
+
+模块固定点没有变（`ee36c75`）：新结构需要的 `SelfBypass.RegisterSocket` /
+`SelfBypassUserspaceRelease` / `RemoveAssignmentIfMatch` / `LastRepair` / `DeliveryKind`
+在这个 commit 与模块补丁里都已经有了，按次统计的 UDP admission 计数（token / peer /
+recovery）也还在 `api.go` 里导出，所以诊断字段一个不少。
+
+组装结果已实测编译通过：`ed2bdc8` + 两份补丁 + `go mod replace ../module`，
+`-tags with_ebpf,with_clash_api,with_quic,with_utls,with_gvisor,with_wireguard,badlinkname`。
 
 ---
 
@@ -70,9 +97,11 @@
 
 | 文件 | 改动 |
 | --- | --- |
-| `option/ebpf.go` | `EBPFInboundOptions` 增加 `Delivery`（顶层）；`EBPFLocalOptions` / `EBPFSharedOptions` 增加 `TCXPriority`、`TCXPosition` |
+| `option/experimental.go` | `ExperimentalOptions` 增加 `EBPF`（`experimental.ebpf`）；`option/ebpf.go` 里新增 `EBPFExperimentalOptions` |
+| `option/ebpf.go` | `EBPFLocalOptions` / `EBPFSharedOptions` 增加 `TCXPriority`、`TCXPosition` |
+| `box.go` | 把 `experimental.ebpf` 塞进 context，inbound 侧才读得到 |
 | `protocol/ebpf/inbound.go` | 新增 `delivery` / `tcxPriority` / `tcxPosition` 字段；`normalizeDelivery`（空值 → `auto`）、`resolveTCXOrder` |
-| `protocol/ebpf/inbound_lifecycle.go` | 把三个值传给 `commonEBPF.TCConfig` |
+| `protocol/ebpf/lifecycle_start.go` | `startTCDataPlane` 里把三个值传给 `commonEBPF.TCConfig` |
 
 ---
 
@@ -221,7 +250,8 @@ L3 省下来的只有 MAC/ARP/邻居表；而交付路径里 MAC 是 eBPF 写进
 
 另有一道**自身早退**：控制块新增 `owner_tgid`（结构体 32 → 36 字节），`handle_v4/6` 第一行比较 `bpf_get_current_pid_tgid() >> 32 == owner_tgid`，相等就直接 `return 1`。这是给 sing-box 自己的 dialer 用的——它的连接永远不该被改写回自己的监听。相比原来的 socket 元数据表（cgroup `sock_create` 打标）它不依赖任何 cgroup 子钩子，也不依赖用户态注册；`owner_tgid = 0`（进程不在初始 PID namespace）时自动关闭，退回元数据表。
 
-**这一节改动了 C 与 map，必须重新生成 `internal/bpfgen/*.o`（`make generate`）。**
+**这一节改动了 C 与 map，`internal/bpfgen/*.o` 必须重生成**——`assemble-source` 工作流里的
+`make generate`（NDK r29 / Clang 21）会做这件事，补丁里不带二进制。
 
 ---
 
