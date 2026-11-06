@@ -243,7 +243,7 @@ index 9e03068..8e8c3b0 100644
  	}))
  }
 diff --git a/protocol/ebpf/diagnostics_snapshot.go b/protocol/ebpf/diagnostics_snapshot.go
-index 8ae2a0a..e613586 100644
+index 8ae2a0a..68fec2f 100644
 --- a/protocol/ebpf/diagnostics_snapshot.go
 +++ b/protocol/ebpf/diagnostics_snapshot.go
 @@ -59,6 +59,7 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
@@ -254,7 +254,7 @@ index 8ae2a0a..e613586 100644
  		diagnostics.TCRoutingMark = tc.NetworkInfo.RoutingMark
  		diagnostics.TCRoutingTable = tc.NetworkInfo.RoutingTable
  		diagnostics.TCRoutingPriority = tc.NetworkInfo.RoutingPriority
-@@ -257,21 +258,9 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
+@@ -257,19 +258,8 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
  		if drops, err := backend.UDPReleaseNotificationDrops(); err == nil {
  			diagnostics.UDPNAT.ReleaseNotificationDrops = drops
  		}
@@ -271,14 +271,11 @@ index 8ae2a0a..e613586 100644
 -		diagnostics.UDPNAT.UDPPeerAdmissionFailures = readStat(commonEBPF.CgroupUDPStatUDPPeerFailure)
 -		diagnostics.UDPNAT.TCPPeerAdmissionFailures = readStat(commonEBPF.CgroupUDPStatTCPPeerFailure)
 -		diagnostics.UDPNAT.UDPRecoveryAdmissionFailures = readStat(commonEBPF.CgroupUDPStatUDPRecoveryFailure)
--	}
--	diagnostics.UDPReplySockets = i.udpReplySockets.snapshot()
 +		// The per-admission UDP counters (token / peer / recovery) are not in the
 +		// object this tree builds; they are diagnostics-only and stay at zero.
-+
+ 	}
+ 	diagnostics.UDPReplySockets = i.udpReplySockets.snapshot()
  
- 	diagnostics.Counters = i.counters.snapshot()
- 	var sharedRewriteBackend *commonEBPF.SharedPacketRewriteBackend
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
 index badcfea..6d955d4 100644
 --- a/protocol/ebpf/inbound.go
@@ -414,7 +411,7 @@ index badcfea..6d955d4 100644
 +	return priority, position, nil
 +}
 diff --git a/protocol/ebpf/interface_topology.go b/protocol/ebpf/interface_topology.go
-index 4781da9..9f514b8 100644
+index 4781da9..370b8b3 100644
 --- a/protocol/ebpf/interface_topology.go
 +++ b/protocol/ebpf/interface_topology.go
 @@ -17,7 +17,24 @@ func (i *Inbound) repairTCInfrastructure() (bool, error) {
@@ -432,11 +429,11 @@ index 4781da9..9f514b8 100644
 +	i.tcNamespaceAccess.RUnlock()
 +	if changed {
 +		i.logger.Debug("eBPF ", ebpfStructuredEvent("tc_repair", map[string]any{
-+		"changed":          changed,
-+		"routing_changed":  routingChanged,
-+		"delivery_changed": deliveryChanged,
-+		"namespace_path":   namespacePath,
-+		"namespace_owned":  namespacePath != "",
++			"changed":          changed,
++			"routing_changed":  routingChanged,
++			"delivery_changed": deliveryChanged,
++			"namespace_path":   namespacePath,
++			"namespace_owned":  namespacePath != "",
 +		}))
 +	}
 +	return changed, err
