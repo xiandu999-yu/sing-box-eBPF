@@ -221,7 +221,7 @@ index b9bb3b2..191d830 100644
  	TCRoutingTable                int        `json:"tc_routing_table,omitempty"`
  	TCRoutingPriority             int        `json:"tc_routing_priority,omitempty"`
 diff --git a/protocol/ebpf/diagnostics_render.go b/protocol/ebpf/diagnostics_render.go
-index 9e03068..8e8c3b0 100644
+index 9e03068..4939188 100644
 --- a/protocol/ebpf/diagnostics_render.go
 +++ b/protocol/ebpf/diagnostics_render.go
 @@ -167,6 +167,9 @@ func (i *Inbound) logStartupSummary() {
@@ -234,12 +234,13 @@ index 9e03068..8e8c3b0 100644
  	i.logger.Info("eBPF ", ebpfStructuredEvent("inbound_start", map[string]any{
  		"state":              diagnostics.State,
  		"configured_paths":   paths,
-@@ -174,5 +177,7 @@ func (i *Inbound) logStartupSummary() {
+@@ -174,5 +177,8 @@ func (i *Inbound) logStartupSummary() {
  		"waiting_paths":      waiting,
  		"waiting_interfaces": waitingInterfaces,
  		"fakeip_icmp":        fakeIPICMPSummary,
 +		"delivery":           i.delivery,
 +		"delivery_used":      diagnostics.TCDeliveryKind,
++		"bypass_process":     i.localBypassProcess,
  	}))
  }
 diff --git a/protocol/ebpf/diagnostics_snapshot.go b/protocol/ebpf/diagnostics_snapshot.go
@@ -410,6 +411,32 @@ index badcfea..6d955d4 100644
 +	}
 +	return priority, position, nil
 +}
+diff --git a/protocol/ebpf/inbound_connection.go b/protocol/ebpf/inbound_connection.go
+index 81f4e40..e53a01e 100644
+--- a/protocol/ebpf/inbound_connection.go
++++ b/protocol/ebpf/inbound_connection.go
+@@ -8,6 +8,7 @@ import (
+ 	"errors"
+ 	"net"
+ 	"net/netip"
++	"path/filepath"
+ 	"strings"
+ 	"syscall"
+ 
+@@ -52,6 +53,13 @@ func (i *Inbound) NewConnection(
+ 		metadata.Source = M.SocksaddrFromNet(conn.RemoteAddr())
+ 		metadata.Destination = M.SocksaddrFromNetIP(original.Destination)
+ 		metadata.ProcessInfo = i.lookupProcessInfo(original.SocketCookie)
++		if metadata.ProcessInfo != nil && len(metadata.ProcessInfo.ProcessPaths) > 0 {
++			i.logger.Info("eBPF TCP ", metadata.Source, " -> ", metadata.Destination,
++				" process=", filepath.Base(metadata.ProcessInfo.ProcessPaths[0]),
++				" uid=", metadata.ProcessInfo.UserId)
++		} else {
++			i.logger.Info("eBPF TCP ", metadata.Source, " -> ", metadata.Destination, " process=unknown")
++		}
+ 		i.router.RouteConnectionEx(ctx, conn, metadata, onClose)
+ 		return
+ 	}
 diff --git a/protocol/ebpf/interface_topology.go b/protocol/ebpf/interface_topology.go
 index 4781da9..370b8b3 100644
 --- a/protocol/ebpf/interface_topology.go
@@ -509,10 +536,18 @@ index ef815c6..ffef4e2 100644
 +	return err
 +}
 diff --git a/protocol/ebpf/tc_connection.go b/protocol/ebpf/tc_connection.go
-index 7e6175f..f270d08 100644
+index 7e6175f..6e8c699 100644
 --- a/protocol/ebpf/tc_connection.go
 +++ b/protocol/ebpf/tc_connection.go
-@@ -33,7 +33,7 @@ func (i *Inbound) newTCConnection(
+@@ -8,6 +8,7 @@ import (
+ 	"net"
+ 	"net/netip"
+ 	"os"
++	"path/filepath"
+ 	"syscall"
+ 
+ 	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
+@@ -33,7 +34,7 @@ func (i *Inbound) newTCConnection(
  ) {
  	source := M.SocksaddrFromNet(conn.RemoteAddr()).AddrPort()
  	destination := M.SocksaddrFromNet(conn.LocalAddr()).AddrPort()
@@ -521,7 +556,7 @@ index 7e6175f..f270d08 100644
  	i.requestTCAssignmentMaintenance()
  	if err != nil {
  		i.counters.assignmentLookupFailures.Add(1)
-@@ -47,6 +47,13 @@ func (i *Inbound) newTCConnection(
+@@ -47,12 +48,26 @@ func (i *Inbound) newTCConnection(
  		_ = conn.Close()
  		return
  	}
@@ -535,3 +570,16 @@ index 7e6175f..f270d08 100644
  	onClose = N.AppendClose(onClose, N.OnceClose(func(error) { returnHandle.Release() }))
  	metadata.Inbound = i.Tag()
  	metadata.InboundType = i.Type()
+ 	metadata.Source = M.SocksaddrFromNetIP(source)
+ 	metadata.Destination = M.SocksaddrFromNetIP(destination)
+ 	metadata.ProcessInfo = i.lookupProcessInfo(assignment.SocketCookie)
++	if metadata.ProcessInfo != nil && len(metadata.ProcessInfo.ProcessPaths) > 0 {
++		i.logger.Info("eBPF TCP ", source, " -> ", destination,
++			" process=", filepath.Base(metadata.ProcessInfo.ProcessPaths[0]),
++			" uid=", metadata.ProcessInfo.UserId)
++	} else {
++		i.logger.Info("eBPF TCP ", source, " -> ", destination, " process=unknown")
++	}
+ 	if assignment.Path == commonEBPF.TCPathShared && assignment.SourceMACValid != 0 {
+ 		metadata.SourceMACAddress = net.HardwareAddr(assignment.SourceMAC[:])
+ 	}
