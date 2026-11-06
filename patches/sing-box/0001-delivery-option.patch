@@ -220,6 +220,28 @@ index b9bb3b2..191d830 100644
  	TCRoutingMark                 uint32     `json:"tc_routing_mark,omitempty"`
  	TCRoutingTable                int        `json:"tc_routing_table,omitempty"`
  	TCRoutingPriority             int        `json:"tc_routing_priority,omitempty"`
+diff --git a/protocol/ebpf/diagnostics_render.go b/protocol/ebpf/diagnostics_render.go
+index 9e03068..8e8c3b0 100644
+--- a/protocol/ebpf/diagnostics_render.go
++++ b/protocol/ebpf/diagnostics_render.go
+@@ -167,6 +167,9 @@ func (i *Inbound) logStartupSummary() {
+ 		}
+ 	}
+ 
++	if i.delivery == deliveryAuto && diagnostics.TCDeliveryKind == deliveryVeth {
++		i.logger.Warn("netkit is unavailable on this kernel, delivery falls back to veth")
++	}
+ 	i.logger.Info("eBPF ", ebpfStructuredEvent("inbound_start", map[string]any{
+ 		"state":              diagnostics.State,
+ 		"configured_paths":   paths,
+@@ -174,5 +177,7 @@ func (i *Inbound) logStartupSummary() {
+ 		"waiting_paths":      waiting,
+ 		"waiting_interfaces": waitingInterfaces,
+ 		"fakeip_icmp":        fakeIPICMPSummary,
++		"delivery":           i.delivery,
++		"delivery_used":      diagnostics.TCDeliveryKind,
+ 	}))
+ }
 diff --git a/protocol/ebpf/diagnostics_snapshot.go b/protocol/ebpf/diagnostics_snapshot.go
 index 8ae2a0a..e613586 100644
 --- a/protocol/ebpf/diagnostics_snapshot.go
