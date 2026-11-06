@@ -481,6 +481,21 @@ index e39453b..a290704 100644
  	processTrackerErr := error(nil)
  	if i.processTracker != nil {
  		i.processTracker, processTrackerErr = closeProcessTrackerOwner(i.processTracker)
+diff --git a/protocol/ebpf/lifecycle_resources.go b/protocol/ebpf/lifecycle_resources.go
+index 3564251..0d8c14b 100644
+--- a/protocol/ebpf/lifecycle_resources.go
++++ b/protocol/ebpf/lifecycle_resources.go
+@@ -29,6 +29,10 @@ func (i *Inbound) prepareCgroupBackend() error {
+ 		UDPTimeout:   i.udpTimeout,
+ 		Policy:       i.compiledPolicy,
+ 		SelfBypass:   i.selfBypass,
++		// The cgroup hooks decide the exclusion inside connect/sendmsg, so the
++		// list has to reach the backend here; without it cgroup_process_bypass
++		// stays empty and every process is proxied.
++		BypassProcess: i.localBypassProcess,
+ 	})
+ 	if err != nil {
+ 		return err
 diff --git a/protocol/ebpf/lifecycle_start.go b/protocol/ebpf/lifecycle_start.go
 index ef815c6..ffef4e2 100644
 --- a/protocol/ebpf/lifecycle_start.go
