@@ -196,35 +196,43 @@ index bf144ad..48a55eb 100644
  }
  
  type CacheFileOptions struct {
-diff --git a/protocol/ebpf/diagnostics.go b/protocol/ebpf/diagnostics.go
-index 66185db..5068486 100644
---- a/protocol/ebpf/diagnostics.go
-+++ b/protocol/ebpf/diagnostics.go
-@@ -155,6 +155,7 @@ type EBPFDiagnostics struct {
- 	TCBackendMode                 string     `json:"tc_backend_mode,omitempty"`
- 	TCListenerLookupMode          string     `json:"tc_listener_lookup_mode,omitempty"`
- 	TCAttachmentMode              string     `json:"tc_attachment_mode,omitempty"`
-+	TCDeliveryKind                string     `json:"tc_delivery_kind,omitempty"`
- 	TCDeliveryInterface           string     `json:"tc_delivery_interface,omitempty"`
- 	TCNetworkNamespace            string     `json:"tc_network_namespace,omitempty"`
- 	TCDeliveryInterfaceIndex      int        `json:"tc_delivery_interface_index,omitempty"`
-@@ -417,6 +418,7 @@ func diagnosticsForAPI(diagnostics EBPFDiagnostics) adapter.EBPFRuntimeDiagnosti
- 		TCBackendMode:                 diagnostics.TCBackendMode,
- 		TCListenerLookupMode:          diagnostics.TCListenerLookupMode,
- 		TCAttachmentMode:              diagnostics.TCAttachmentMode,
-+		TCDeliveryKind:                diagnostics.TCDeliveryKind,
+diff --git a/protocol/ebpf/diagnostics_api.go b/protocol/ebpf/diagnostics_api.go
+index ff16172..98d2cb2 100644
+--- a/protocol/ebpf/diagnostics_api.go
++++ b/protocol/ebpf/diagnostics_api.go
+@@ -69,6 +69,7 @@ func diagnosticsForAPI(diagnostics EBPFDiagnostics) adapter.EBPFRuntimeDiagnosti
  		TCDeliveryInterface:           diagnostics.TCDeliveryInterface,
  		TCNetworkNamespace:            diagnostics.TCNetworkNamespace,
  		TCDeliveryInterfaceIndex:      diagnostics.TCDeliveryInterfaceIndex,
-@@ -666,6 +668,7 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
- 		tc := tcDataPlane.TCDiagnostics()
- 		diagnostics.TCListenerLookupMode = tc.ListenerLookupMode
- 		diagnostics.TCAttachmentMode = tc.AttachmentMode
-+		diagnostics.TCDeliveryKind = tc.DeliveryKind
++		TCDeliveryKind:                diagnostics.TCDeliveryKind,
+ 		TCRoutingMark:                 diagnostics.TCRoutingMark,
+ 		TCRoutingTable:                diagnostics.TCRoutingTable,
+ 		TCRoutingPriority:             diagnostics.TCRoutingPriority,
+diff --git a/protocol/ebpf/diagnostics_model.go b/protocol/ebpf/diagnostics_model.go
+index b9bb3b2..191d830 100644
+--- a/protocol/ebpf/diagnostics_model.go
++++ b/protocol/ebpf/diagnostics_model.go
+@@ -150,6 +150,7 @@ type EBPFDiagnostics struct {
+ 	TCDeliveryInterface           string     `json:"tc_delivery_interface,omitempty"`
+ 	TCNetworkNamespace            string     `json:"tc_network_namespace,omitempty"`
+ 	TCDeliveryInterfaceIndex      int        `json:"tc_delivery_interface_index,omitempty"`
++	TCDeliveryKind                string     `json:"tc_delivery_kind,omitempty"`
+ 	TCRoutingMark                 uint32     `json:"tc_routing_mark,omitempty"`
+ 	TCRoutingTable                int        `json:"tc_routing_table,omitempty"`
+ 	TCRoutingPriority             int        `json:"tc_routing_priority,omitempty"`
+diff --git a/protocol/ebpf/diagnostics_snapshot.go b/protocol/ebpf/diagnostics_snapshot.go
+index 8ae2a0a..e613586 100644
+--- a/protocol/ebpf/diagnostics_snapshot.go
++++ b/protocol/ebpf/diagnostics_snapshot.go
+@@ -59,6 +59,7 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
  		diagnostics.TCDeliveryInterface = tc.NetworkInfo.DeliveryInterface
  		diagnostics.TCNetworkNamespace = tc.NetworkInfo.Namespace
  		diagnostics.TCDeliveryInterfaceIndex = tc.NetworkInfo.DeliveryInterfaceIndex
-@@ -867,19 +870,9 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
++		diagnostics.TCDeliveryKind = tc.DeliveryKind
+ 		diagnostics.TCRoutingMark = tc.NetworkInfo.RoutingMark
+ 		diagnostics.TCRoutingTable = tc.NetworkInfo.RoutingTable
+ 		diagnostics.TCRoutingPriority = tc.NetworkInfo.RoutingPriority
+@@ -257,21 +258,9 @@ func (i *Inbound) Diagnostics() EBPFDiagnostics {
  		if drops, err := backend.UDPReleaseNotificationDrops(); err == nil {
  			diagnostics.UDPNAT.ReleaseNotificationDrops = drops
  		}
@@ -241,30 +249,14 @@ index 66185db..5068486 100644
 -		diagnostics.UDPNAT.UDPPeerAdmissionFailures = readStat(commonEBPF.CgroupUDPStatUDPPeerFailure)
 -		diagnostics.UDPNAT.TCPPeerAdmissionFailures = readStat(commonEBPF.CgroupUDPStatTCPPeerFailure)
 -		diagnostics.UDPNAT.UDPRecoveryAdmissionFailures = readStat(commonEBPF.CgroupUDPStatUDPRecoveryFailure)
-+		// The per-admission UDP counters (token / peer / recovery) were added to
-+		// the module after the fork this tree pins; they are diagnostics-only, so
-+		// they stay at zero here instead of pulling in a newer object ABI.
- 	}
- 	diagnostics.UDPReplySockets = i.udpReplySockets.snapshot()
+-	}
+-	diagnostics.UDPReplySockets = i.udpReplySockets.snapshot()
++		// The per-admission UDP counters (token / peer / recovery) are not in the
++		// object this tree builds; they are diagnostics-only and stay at zero.
++
  
-@@ -1203,6 +1196,9 @@ func (i *Inbound) logStartupSummary() {
- 		}
- 	}
- 
-+	if i.delivery == deliveryAuto && diagnostics.TCDeliveryKind == deliveryVeth {
-+		i.logger.Warn("netkit is unavailable on this kernel, delivery falls back to veth")
-+	}
- 	i.logger.Info("eBPF ", ebpfStructuredEvent("inbound_start", map[string]any{
- 		"state":              diagnostics.State,
- 		"configured_paths":   paths,
-@@ -1210,5 +1206,7 @@ func (i *Inbound) logStartupSummary() {
- 		"waiting_paths":      waiting,
- 		"waiting_interfaces": waitingInterfaces,
- 		"fakeip_icmp":        fakeIPICMPSummary,
-+		"delivery":           i.delivery,
-+		"delivery_used":      diagnostics.TCDeliveryKind,
- 	}))
- }
+ 	diagnostics.Counters = i.counters.snapshot()
+ 	var sharedRewriteBackend *commonEBPF.SharedPacketRewriteBackend
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
 index badcfea..6d955d4 100644
 --- a/protocol/ebpf/inbound.go
@@ -399,83 +391,6 @@ index badcfea..6d955d4 100644
 +	}
 +	return priority, position, nil
 +}
-diff --git a/protocol/ebpf/inbound_lifecycle.go b/protocol/ebpf/inbound_lifecycle.go
-index 2b0618b..b03a51c 100644
---- a/protocol/ebpf/inbound_lifecycle.go
-+++ b/protocol/ebpf/inbound_lifecycle.go
-@@ -101,6 +101,13 @@ func (i *Inbound) startInbound() error {
- 		if err := cgroupBackend.LoadPrograms(i.listeners.selectedPort()); err != nil {
- 			return err
- 		}
-+	} else if i.localEnabled && len(i.localBypassProcess) > 0 {
-+		// socket_assign keeps the data plane in TC; only the cgroup hooks run in
-+		// the calling process, so attach the slimmed markers that flag the
-+		// excluded processes' sockets for TC.
-+		if err := i.startProcessMarkers(); err != nil {
-+			return err
-+		}
- 	}
- 	if i.localCgroupEnabled() || sharedRewriteEnabled {
- 		if err := i.setupLocalRoutes(); err != nil {
-@@ -116,6 +123,9 @@ func (i *Inbound) startInbound() error {
- 		EnableSharedIPv6: sharedSocketAssignEnabled && i.sharedIPv6,
- 		EnableTCP:        i.enableTCP,
- 		EnableUDP:        i.enableUDP,
-+		Delivery:         i.delivery,
-+		TCXPriority:      i.tcxPriority,
-+		TCXPosition:      i.tcxPosition,
- 		Policy:           i.compiledPolicy,
- 		SelfBypass:       i.selfBypass,
- 		TrackProcess:     i.processTracker != nil,
-@@ -519,6 +529,7 @@ func (i *Inbound) closeResources() error {
- 	i.stopTCAssignmentJanitor()
- 	monitorErr := i.stopTCInterfaceMonitor()
- 	i.stopBypassRuleSets()
-+	_ = i.closeProcessMarkers()
- 	sharedRewriteErr := error(nil)
- 	if shared := i.takeSharedRewrite(); shared != nil {
- 		sharedRewriteErr = shared.Close()
-@@ -612,6 +623,28 @@ func closeProcessTrackerOwner(tracker processTrackerOwner) (processTrackerOwner,
- 	return tracker, closeErr
- }
- 
-+func (i *Inbound) startProcessMarkers() error {
-+	markers, err := commonEBPF.PrepareProcessMarker(commonEBPF.ProcessMarkerConfig{
-+		Path:          i.cgroupPath,
-+		BypassProcess: i.localBypassProcess,
-+		SelfBypass:    i.selfBypass,
-+	})
-+	if err != nil {
-+		return E.Cause(err, "attach eBPF process markers")
-+	}
-+	i.processMarkers = markers
-+	return nil
-+}
-+
-+func (i *Inbound) closeProcessMarkers() error {
-+	if i.processMarkers == nil {
-+		return nil
-+	}
-+	err := i.processMarkers.Close()
-+	i.processMarkers = nil
-+	return err
-+}
-+
- func (i *Inbound) prepareCgroupBackend() error {
- 	if err := i.reclaimCgroupBackend(); err != nil {
- 		return err
-@@ -629,8 +662,9 @@ func (i *Inbound) prepareCgroupBackend() error {
- 		RedirectIPv6: i.redirectIPv6Prefix,
- 		MapCapacity:  mapCapacity,
- 		UDPTimeout:   i.udpTimeout,
--		Policy:       i.compiledPolicy,
--		SelfBypass:   i.selfBypass,
-+		Policy:        i.compiledPolicy,
-+		BypassProcess: i.localBypassProcess,
-+		SelfBypass:    i.selfBypass,
- 	})
- 	if err != nil {
- 		return err
 diff --git a/protocol/ebpf/interface_topology.go b/protocol/ebpf/interface_topology.go
 index 4781da9..9f514b8 100644
 --- a/protocol/ebpf/interface_topology.go
@@ -506,6 +421,74 @@ index 4781da9..9f514b8 100644
  }
  
  func (i *Inbound) monitoredDefaultInterfaceName() string {
+diff --git a/protocol/ebpf/lifecycle_close.go b/protocol/ebpf/lifecycle_close.go
+index e39453b..a290704 100644
+--- a/protocol/ebpf/lifecycle_close.go
++++ b/protocol/ebpf/lifecycle_close.go
+@@ -89,6 +89,9 @@ func (i *Inbound) closeResources() error {
+ 			selfBypassErr = E.New("eBPF self-bypass remained open after close")
+ 		}
+ 	}
++	if err := i.closeProcessMarkers(); err != nil {
++		return err
++	}
+ 	processTrackerErr := error(nil)
+ 	if i.processTracker != nil {
+ 		i.processTracker, processTrackerErr = closeProcessTrackerOwner(i.processTracker)
+diff --git a/protocol/ebpf/lifecycle_start.go b/protocol/ebpf/lifecycle_start.go
+index ef815c6..ffef4e2 100644
+--- a/protocol/ebpf/lifecycle_start.go
++++ b/protocol/ebpf/lifecycle_start.go
+@@ -108,6 +108,9 @@ func (i *Inbound) startInbound() error {
+ 	}
+ 	backendConfig := commonEBPF.TCConfig{
+ 		ListenerPort:      i.tcListeners.selectedPort(),
++		Delivery:          i.delivery,
++		TCXPriority:       i.tcxPriority,
++		TCXPosition:       i.tcxPosition,
+ 		EnableLocal:       localSocketAssignEnabled,
+ 		EnableShared:      sharedSocketAssignEnabled,
+ 		EnableIPv4:        true,
+@@ -188,6 +191,13 @@ func (i *Inbound) startInbound() error {
+ 		}
+ 		i.startCgroupRecoveryScheduler(cgroupBackend)
+ 		i.startCgroupUDPReleaseReader(cgroupBackend)
++	} else if i.localEnabled && len(i.localBypassProcess) > 0 {
++		// socket_assign keeps the data plane in TC; only the cgroup hooks run in
++		// the calling process, so attach the slimmed markers that flag the
++		// excluded processes' sockets for TC.
++		if err = i.startProcessMarkers(); err != nil {
++			return err
++		}
+ 	}
+ 	if backend != nil {
+ 		if err = backend.Enable(); err != nil {
+@@ -503,3 +513,25 @@ func combineStartError(startErr error, cleanupErr error) error {
+ 	}
+ 	return E.Errors(startErr, E.Cause(cleanupErr, "cleanup eBPF inbound"))
+ }
++
++func (i *Inbound) startProcessMarkers() error {
++	markers, err := commonEBPF.PrepareProcessMarker(commonEBPF.ProcessMarkerConfig{
++		Path:          i.cgroupPath,
++		BypassProcess: i.localBypassProcess,
++		SelfBypass:    i.selfBypass,
++	})
++	if err != nil {
++		return E.Cause(err, "attach eBPF process markers")
++	}
++	i.processMarkers = markers
++	return nil
++}
++
++func (i *Inbound) closeProcessMarkers() error {
++	if i.processMarkers == nil {
++		return nil
++	}
++	err := i.processMarkers.Close()
++	i.processMarkers = nil
++	return err
++}
 diff --git a/protocol/ebpf/tc_connection.go b/protocol/ebpf/tc_connection.go
 index 7e6175f..f270d08 100644
 --- a/protocol/ebpf/tc_connection.go
