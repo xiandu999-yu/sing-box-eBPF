@@ -86,6 +86,37 @@ jobs:
           echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
           echo "SRC_ID=$SRC_ID" >> "$GITHUB_ENV"
 
+      # 补丁是行级 diff：上游把函数或字段挪走之后，补丁可能照样"应用成功"，
+      # 但改动落在没人调用的位置，编译不报错、运行时静默失效。
+      # 这里逐个确认关键改动还贴在真正生效的代码上，再去打包发布。
+      - name: Verify patch anchors
+        run: |
+          set -eu
+          cd sing-box/src
+          fail() { echo "::error::$1"; exit 1; }
+
+          grep -qs 'BypassProcess: i.localBypassProcess' protocol/ebpf/lifecycle_resources.go \
+            || fail "bypass_process 没有传进 CgroupConfig，cgroup 数据面会代理所有进程"
+          grep -qs 'json:"bypass_process,omitempty"' option/ebpf.go \
+            || fail "bypass_process 配置项不见了"
+          grep -qs 'i.startProcessMarkers()' protocol/ebpf/lifecycle_start.go \
+            || fail "socket_assign 的 marker-only 钩子没有启动"
+          grep -Eqs 'Delivery: +i\.delivery' protocol/ebpf/lifecycle_start.go \
+            || fail "delivery/tcx_* 没有传进 TCConfig"
+          grep -qs 'processName = filepath.Base(processPath)' experimental/clashapi/connections.go \
+            || fail "clashapi 进程名字段不见了"
+          grep -qs 'eBPF TCP ' protocol/ebpf/inbound_connection.go \
+            || fail "cgroup 侧的 TCP INFO 日志不见了"
+          grep -qs 'eBPF TCP ' protocol/ebpf/tc_connection.go \
+            || fail "socket_assign 侧的 TCP INFO 日志不见了"
+
+          # tc_repair 探针缝在 repairTCInfrastructure 里；上游把它挪走就必须重做补丁。
+          anchor=$(grep -rls 'func (i \*Inbound) repairTCInfrastructure' protocol/ebpf | head -n 1)
+          [ -n "$anchor" ] || fail "找不到 repairTCInfrastructure，TC 修复逻辑已改结构"
+          grep -qs 'tc_repair' "$anchor" \
+            || fail "tc_repair 探针不在 $anchor 里了，补丁落点已失效"
+          echo "all anchors ok"
+
       - name: Publish to sing-box-src release
         env:
           GH_TOKEN: ${{ github.token }}
