@@ -14,30 +14,37 @@
 
 ---
 
-## 0. 基准：`ed2bdc8`（2026-11-06）
+## 0. 基准：`d3217e2` / 模块 `1af55b7a`（2026-11-07）
 
-`ci/pins.env` 的 `SING_BOX_COMMIT` 从 `2f42c08`（`refactor(ebpf): isolate maintenance workers`）
-前移到 `ed2bdc8`（`fix(ebpf): register packet listeners after bind`）。上游这一跳把 eBPF inbound
-拆成了三个内嵌结构体，补丁已按新结构重做，不是简单 rebase：
+`ci/pins.env` 现在是：
+
+| 固定点 | commit | 内容 |
+| --- | --- | --- |
+| `SING_BOX_COMMIT` | `d3217e29` `deps(ebpf): adopt userspace release cleanup contract` | 相对 `ed2bdc8` 只改了 `go.mod` / `go.sum`（模块固定点前移到 `1af55b7a`），代码结构没变，补丁原样套用 |
+| `MODULE_COMMIT` | `1af55b7a` `fix(self-bypass): clean up userspace release registrations` | `SelfBypassUserspaceRelease` 的 `CleanupMode()` 改为 `userspace_unregister`；`UnregisterSocket` 在没有内核 release 钩子时也删条目，删除本身幂等（双清理路径） |
+
+再往前一跳是 `2f42c08` → `ed2bdc8`（`fix(ebpf): register packet listeners after bind`）：上游把 eBPF inbound
+拆成了三个内嵌结构体，补丁是按新结构重做的，不是简单 rebase：
 
 | 上游改动 | 补丁的应对 |
 | --- | --- |
 | `Inbound` 拆成 `inboundResources`（句柄）/ `inboundWorkers`（goroutine 与 WaitGroup）/ `inboundDiagnostics`（计数器与告警限流器） | `processMarkers` 放进 `inboundResources`；`localBypassProcess`、`tcxPriority`、`tcxPosition`、`delivery` 留在 `Inbound` 本体 |
 | 数据面启动拆成 `startCgroupDataPlane` / `startTCDataPlane` / `startSharedRewriteDataPlane` / `startTCListenersIfNeeded` | `delivery` / `tcx_*` 改为在 `startTCDataPlane` 里写进 `TCConfig`；marker-only 钩子挂在 cgroup 数据面之后的分支上 |
-| 监听器移到 `common/listener`，socket 注册改为 bind 成功之后（本 commit 的正文） | 无需改动，属于上游自己的修复 |
+| 监听器移到 `common/listener`，socket 注册改为 bind 成功之后 | 无需改动，属于上游自己的修复 |
 | `lifecycleAccess` 互斥量 + `logStartupSummaryLocked` / `runtimeSnapshotLocked` | 启动日志的三个字段（`delivery` / `delivery_used` / `bypass_process`）跟着搬进新函数 |
 
 `assemble-source` 里加了 **Verify patch anchors** 一步：补丁是行级 diff，上游再把函数挪走时
 照样能"应用成功"，所以逐个断言关键改动还在真正生效的代码上（尤其是缝在
 `repairTCInfrastructure` 里的 `tc_repair` 探针）。
 
-模块固定点没有变（`ee36c75`）：新结构需要的 `SelfBypass.RegisterSocket` /
-`SelfBypassUserspaceRelease` / `RemoveAssignmentIfMatch` / `LastRepair` / `DeliveryKind`
-在这个 commit 与模块补丁里都已经有了，按次统计的 UDP admission 计数（token / peer /
-recovery）也还在 `api.go` 里导出，所以诊断字段一个不少。
+模块这侧本轮只做了两件事：把模块补丁挪到 `1af55b7a`（25 个文件，零冲突），
+顺手 `gofmt`（之前几处结构体对齐不合规）。`SelfBypass.RegisterSocket` /
+`RemoveAssignmentIfMatch` / `LastRepair` / `DeliveryKind` 和按次统计的 UDP admission 计数
+（token / peer / recovery）在 `1af55b7a` 里都还在，补丁不需要额外接口。
 
-组装结果已实测编译通过：`ed2bdc8` + 两份补丁 + `go mod replace ../module`，
-`-tags with_ebpf,with_clash_api,with_quic,with_utls,with_gvisor,with_wireguard,badlinkname`。
+组装结果已实测编译通过：`d3217e2` + 两份补丁 + `go mod replace ../module`，
+`-tags with_ebpf,with_clash_api,with_quic,with_utls,with_gvisor,with_wireguard,badlinkname`；
+`sing-box check` 用带 `bypass_process` / `netkit-l3` / `socket_assign` 的配置跑通。
 
 ---
 

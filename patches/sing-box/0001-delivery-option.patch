@@ -1,5 +1,5 @@
 diff --git a/adapter/ebpf.go b/adapter/ebpf.go
-index 7b8c07f..881d0d2 100644
+index 7b8c07fb..881d0d2b 100644
 --- a/adapter/ebpf.go
 +++ b/adapter/ebpf.go
 @@ -80,6 +80,7 @@ type EBPFRuntimeDiagnostics struct {
@@ -11,7 +11,7 @@ index 7b8c07f..881d0d2 100644
  	TCNetworkNamespace            string
  	TCDeliveryInterfaceIndex      int
 diff --git a/box.go b/box.go
-index 143f1ea..1a29767 100644
+index 143f1eab..1a29767f 100644
 --- a/box.go
 +++ b/box.go
 @@ -114,6 +114,12 @@ func New(options Options) (*Box, error) {
@@ -28,7 +28,7 @@ index 143f1ea..1a29767 100644
  	endpointRegistry := service.FromContext[adapter.EndpointRegistry](ctx)
  	inboundRegistry := service.FromContext[adapter.InboundRegistry](ctx)
 diff --git a/cmd/sing-box/cmd_tools_ebpf.go b/cmd/sing-box/cmd_tools_ebpf.go
-index eadef9e..f0fd6be 100644
+index eadef9e4..f0fd6be8 100644
 --- a/cmd/sing-box/cmd_tools_ebpf.go
 +++ b/cmd/sing-box/cmd_tools_ebpf.go
 @@ -7,6 +7,7 @@ import (
@@ -70,7 +70,7 @@ index eadef9e..f0fd6be 100644
  		Mode:                mode,
  		LocalDataPlane:      commonEBPF.KernelProbeDataPlane(commandEBPFStatusLocal),
 diff --git a/experimental/clashapi/connections.go b/experimental/clashapi/connections.go
-index 3da9dc6..0a379a7 100644
+index 3da9dc6e..0a379a7d 100644
 --- a/experimental/clashapi/connections.go
 +++ b/experimental/clashapi/connections.go
 @@ -4,6 +4,7 @@ import (
@@ -127,7 +127,7 @@ index 3da9dc6..0a379a7 100644
  		"upload":      c.Upload.Load(),
  		"download":    c.Download.Load(),
 diff --git a/option/ebpf.go b/option/ebpf.go
-index fb2474a..eba3087 100644
+index fb2474a9..eba30873 100644
 --- a/option/ebpf.go
 +++ b/option/ebpf.go
 @@ -26,30 +26,55 @@ type EBPFInboundOptions struct {
@@ -207,7 +207,7 @@ index fb2474a..eba3087 100644
  	Interface            badoption.Listable[string]       `json:"interface,omitempty"`
  	IPv6                 *bool                            `json:"ipv6,omitempty"`
 diff --git a/option/experimental.go b/option/experimental.go
-index bf144ad..48a55eb 100644
+index bf144ad4..48a55ebc 100644
 --- a/option/experimental.go
 +++ b/option/experimental.go
 @@ -6,10 +6,11 @@ import (
@@ -227,7 +227,7 @@ index bf144ad..48a55eb 100644
  
  type CacheFileOptions struct {
 diff --git a/protocol/ebpf/diagnostics_api.go b/protocol/ebpf/diagnostics_api.go
-index ff16172..98d2cb2 100644
+index ff161729..98d2cb22 100644
 --- a/protocol/ebpf/diagnostics_api.go
 +++ b/protocol/ebpf/diagnostics_api.go
 @@ -69,6 +69,7 @@ func diagnosticsForAPI(diagnostics EBPFDiagnostics) adapter.EBPFRuntimeDiagnosti
@@ -239,7 +239,7 @@ index ff16172..98d2cb2 100644
  		TCRoutingTable:                diagnostics.TCRoutingTable,
  		TCRoutingPriority:             diagnostics.TCRoutingPriority,
 diff --git a/protocol/ebpf/diagnostics_model.go b/protocol/ebpf/diagnostics_model.go
-index b9bb3b2..191d830 100644
+index b9bb3b25..191d8302 100644
 --- a/protocol/ebpf/diagnostics_model.go
 +++ b/protocol/ebpf/diagnostics_model.go
 @@ -150,6 +150,7 @@ type EBPFDiagnostics struct {
@@ -251,7 +251,7 @@ index b9bb3b2..191d830 100644
  	TCRoutingTable                int        `json:"tc_routing_table,omitempty"`
  	TCRoutingPriority             int        `json:"tc_routing_priority,omitempty"`
 diff --git a/protocol/ebpf/diagnostics_render.go b/protocol/ebpf/diagnostics_render.go
-index dd0235d..39d8756 100644
+index dd0235d6..39d8756b 100644
 --- a/protocol/ebpf/diagnostics_render.go
 +++ b/protocol/ebpf/diagnostics_render.go
 @@ -173,6 +173,9 @@ func (i *Inbound) logStartupSummaryLocked() {
@@ -274,7 +274,7 @@ index dd0235d..39d8756 100644
  	}))
  }
 diff --git a/protocol/ebpf/diagnostics_snapshot.go b/protocol/ebpf/diagnostics_snapshot.go
-index 539434a..bfc99aa 100644
+index 539434ae..bfc99aac 100644
 --- a/protocol/ebpf/diagnostics_snapshot.go
 +++ b/protocol/ebpf/diagnostics_snapshot.go
 @@ -96,6 +96,7 @@ func (i *Inbound) diagnosticsLocked() EBPFDiagnostics {
@@ -286,7 +286,7 @@ index 539434a..bfc99aa 100644
  		diagnostics.TCRoutingTable = tc.NetworkInfo.RoutingTable
  		diagnostics.TCRoutingPriority = tc.NetworkInfo.RoutingPriority
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
-index 0d5a972..45d1b40 100644
+index 0d5a9720..45d1b40e 100644
 --- a/protocol/ebpf/inbound.go
 +++ b/protocol/ebpf/inbound.go
 @@ -29,6 +29,11 @@ const (
@@ -420,7 +420,7 @@ index 0d5a972..45d1b40 100644
 +	return priority, position, nil
 +}
 diff --git a/protocol/ebpf/inbound_connection.go b/protocol/ebpf/inbound_connection.go
-index fd60c7a..63cc440 100644
+index fd60c7aa..63cc4402 100644
 --- a/protocol/ebpf/inbound_connection.go
 +++ b/protocol/ebpf/inbound_connection.go
 @@ -8,6 +8,7 @@ import (
@@ -446,7 +446,7 @@ index fd60c7a..63cc440 100644
  		return
  	}
 diff --git a/protocol/ebpf/interface_topology.go b/protocol/ebpf/interface_topology.go
-index 4781da9..370b8b3 100644
+index 4781da99..370b8b3c 100644
 --- a/protocol/ebpf/interface_topology.go
 +++ b/protocol/ebpf/interface_topology.go
 @@ -17,7 +17,24 @@ func (i *Inbound) repairTCInfrastructure() (bool, error) {
@@ -476,7 +476,7 @@ index 4781da9..370b8b3 100644
  
  func (i *Inbound) monitoredDefaultInterfaceName() string {
 diff --git a/protocol/ebpf/lifecycle_close.go b/protocol/ebpf/lifecycle_close.go
-index 2a52643..18e8e75 100644
+index 2a526435..18e8e75c 100644
 --- a/protocol/ebpf/lifecycle_close.go
 +++ b/protocol/ebpf/lifecycle_close.go
 @@ -58,6 +58,9 @@ func (i *Inbound) closeResources() error {
@@ -490,7 +490,7 @@ index 2a52643..18e8e75 100644
  	if i.processTracker != nil {
  		i.processTracker, processTrackerErr = closeProcessTrackerOwner(i.processTracker)
 diff --git a/protocol/ebpf/lifecycle_resources.go b/protocol/ebpf/lifecycle_resources.go
-index 7f06bc5..0eb8cf2 100644
+index 7f06bc5d..0eb8cf2e 100644
 --- a/protocol/ebpf/lifecycle_resources.go
 +++ b/protocol/ebpf/lifecycle_resources.go
 @@ -29,6 +29,10 @@ func (i *Inbound) prepareCgroupBackend() error {
@@ -505,7 +505,7 @@ index 7f06bc5..0eb8cf2 100644
  	if err != nil {
  		return err
 diff --git a/protocol/ebpf/lifecycle_start.go b/protocol/ebpf/lifecycle_start.go
-index e789b39..ba5c835 100644
+index e789b399..ba5c8358 100644
 --- a/protocol/ebpf/lifecycle_start.go
 +++ b/protocol/ebpf/lifecycle_start.go
 @@ -113,6 +113,13 @@ func (i *Inbound) startInbound() error {
@@ -559,7 +559,7 @@ index e789b39..ba5c835 100644
 +	return err
 +}
 diff --git a/protocol/ebpf/tc_connection.go b/protocol/ebpf/tc_connection.go
-index 2cff9f3..f590dd3 100644
+index 2cff9f38..f590dd3f 100644
 --- a/protocol/ebpf/tc_connection.go
 +++ b/protocol/ebpf/tc_connection.go
 @@ -8,6 +8,7 @@ import (

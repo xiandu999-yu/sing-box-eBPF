@@ -60,7 +60,7 @@ index 0000000..0ef39f6
 +          if-no-files-found: error
 +          retention-days: 7
 diff --git a/api.go b/api.go
-index 8600b25..5bbc4b1 100644
+index 8600b25..9a82326 100644
 --- a/api.go
 +++ b/api.go
 @@ -142,6 +142,14 @@ type SelfBypass struct {
@@ -78,7 +78,7 @@ index 8600b25..5bbc4b1 100644
  func NewSelfBypass() (*SelfBypass, error) {
  	backend, err := core.NewSelfBypass()
  	if err != nil {
-@@ -216,6 +224,13 @@ type CgroupConfig struct {
+@@ -216,22 +224,72 @@ type CgroupConfig struct {
  	UDPTimeout   time.Duration
  	Policy       CompiledPolicy
  	SelfBypass   *SelfBypass
@@ -92,11 +92,24 @@ index 8600b25..5bbc4b1 100644
  }
  
  func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
-@@ -228,10 +243,53 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
- 		RedirectIPv6: config.RedirectIPv6,
- 		MapCapacity:  config.MapCapacity,
- 		UDPTimeout:   config.UDPTimeout,
+ 	return core.PrepareCgroupWithSelfBypass(core.CgroupConfig{
+-		Path:         config.Path,
+-		EnableTCP:    config.EnableTCP,
+-		EnableUDP:    config.EnableUDP,
+-		EnableIPv6:   config.EnableIPv6,
+-		RedirectIPv4: config.RedirectIPv4,
+-		RedirectIPv6: config.RedirectIPv6,
+-		MapCapacity:  config.MapCapacity,
+-		UDPTimeout:   config.UDPTimeout,
 -		Policy:       config.Policy,
++		Path:          config.Path,
++		EnableTCP:     config.EnableTCP,
++		EnableUDP:     config.EnableUDP,
++		EnableIPv6:    config.EnableIPv6,
++		RedirectIPv4:  config.RedirectIPv4,
++		RedirectIPv6:  config.RedirectIPv6,
++		MapCapacity:   config.MapCapacity,
++		UDPTimeout:    config.UDPTimeout,
 +		Policy:        config.Policy,
 +		BypassProcess: config.BypassProcess,
 +		MarkerOnly:    config.MarkerOnly,
@@ -147,16 +160,34 @@ index 8600b25..5bbc4b1 100644
  type ProcessTrackerConfig struct {
  	EnableTCP    bool
  	EnableUDP    bool
-@@ -262,6 +320,12 @@ type TCConfig struct {
- 	EnableTCP          bool
- 	EnableUDP          bool
- 	DeliveryInterface  uint32
+@@ -253,15 +311,21 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error)
+ 
+ type TCConfig struct {
+ 	// TCP and UDP preserve their tuples in a required private listener namespace.
+-	ListenerPort       uint16
+-	EnableLocal        bool
+-	EnableShared       bool
+-	EnableIPv4         bool
+-	EnableLocalIPv6    bool
+-	EnableSharedIPv6   bool
+-	EnableTCP          bool
+-	EnableUDP          bool
+-	DeliveryInterface  uint32
++	ListenerPort      uint16
++	EnableLocal       bool
++	EnableShared      bool
++	EnableIPv4        bool
++	EnableLocalIPv6   bool
++	EnableSharedIPv6  bool
++	EnableTCP         bool
++	EnableUDP         bool
++	DeliveryInterface uint32
 +	// Delivery selects the socket-assignment delivery link kind.
 +	Delivery string
 +	// TCXPriority orders TCX programs on the hook; lower runs first.
 +	TCXPriority uint16
 +	// TCXPosition picks the chain end when TCXPriority is unset: "head" or "tail".
-+	TCXPosition string
++	TCXPosition        string
  	Policy             CompiledPolicy
  	RoutingMark        uint32
  	SelfBypass         *SelfBypass
@@ -253,16 +284,16 @@ index f7d81ab..11dd2b8 100644
  
  func DefaultCgroupMapCapacity() CgroupMapCapacity {
 diff --git a/internal/core/cgroup_backend.go b/internal/core/cgroup_backend.go
-index 9a78ac7..b5102b3 100644
+index 9a78ac7..0cdebfa 100644
 --- a/internal/core/cgroup_backend.go
 +++ b/internal/core/cgroup_backend.go
 @@ -107,6 +107,9 @@ type cgroupRuntime struct {
  }
  
  type CgroupBackend struct {
-+	bypassProcess           []string
-+	ownerTGID               uint32
-+	markerOnly              bool
++	bypassProcess          []string
++	ownerTGID              uint32
++	markerOnly             bool
  	access                 sync.RWMutex
  	health                 backendHealth
  	recovery               cgroupRecoveryStore
@@ -440,20 +471,21 @@ index 57f1ff7..f778d7f 100644
  	if b.redirectIPv6.IsValid() {
  		address := b.redirectIPv6.Addr().As16()
 diff --git a/internal/core/diagnostics.go b/internal/core/diagnostics.go
-index 8c4079d..ec95418 100644
+index 8c4079d..3303cbc 100644
 --- a/internal/core/diagnostics.go
 +++ b/internal/core/diagnostics.go
 @@ -44,5 +44,7 @@ type TCDiagnostics struct {
  	RetiredAttachmentCount int
  	RetiredDeliveryCount   int
  	Priority               uint16
+-	RequiresRebuild        bool
 +	// DeliveryKind is the delivery link actually created ("veth" or "netkit").
-+	DeliveryKind           string
- 	RequiresRebuild        bool
++	DeliveryKind    string
++	RequiresRebuild bool
  }
 diff --git a/internal/core/marker.go b/internal/core/marker.go
 new file mode 100644
-index 0000000..14bc1f6
+index 0000000..cf420b8
 --- /dev/null
 +++ b/internal/core/marker.go
 @@ -0,0 +1,151 @@
@@ -499,7 +531,7 @@ index 0000000..14bc1f6
 +}
 +
 +const (
-+	processMarkerLPM = "cgroup_process_bypass"
++	processMarkerLPM     = "cgroup_process_bypass"
 +	processMarkerSockets = "cgroup_socket_bypass"
 +)
 +
@@ -672,20 +704,38 @@ index 0000000..80d573b
 +	return key, nil
 +}
 diff --git a/internal/core/tc.go b/internal/core/tc.go
-index b6321e4..f9a608e 100644
+index b6321e4..97c1314 100644
 --- a/internal/core/tc.go
 +++ b/internal/core/tc.go
-@@ -101,6 +101,13 @@ type TCConfig struct {
- 	EnableTCP          bool
- 	EnableUDP          bool
- 	DeliveryInterface  uint32
+@@ -92,15 +92,22 @@ const (
+ )
+ 
+ type TCConfig struct {
+-	ListenerPort       uint16
+-	EnableLocal        bool
+-	EnableShared       bool
+-	EnableIPv4         bool
+-	EnableLocalIPv6    bool
+-	EnableSharedIPv6   bool
+-	EnableTCP          bool
+-	EnableUDP          bool
+-	DeliveryInterface  uint32
++	ListenerPort      uint16
++	EnableLocal       bool
++	EnableShared      bool
++	EnableIPv4        bool
++	EnableLocalIPv6   bool
++	EnableSharedIPv6  bool
++	EnableTCP         bool
++	EnableUDP         bool
++	DeliveryInterface uint32
 +	// Delivery selects the socket-assignment delivery link kind: "" or "veth"
 +	// (default), "netkit" (L2 framing), "netkit-l3" (experimental, same frames).
 +	Delivery string
 +	// TCXPriority orders TCX programs on the hook; lower runs first.
 +	TCXPriority uint16
 +	// TCXPosition picks the chain end when TCXPriority is unset: "head" or "tail".
-+	TCXPosition string
++	TCXPosition        string
  	Policy             CompiledPolicy
  	RoutingMark        uint32
  	SelfBypassMap      *CiliumEBPF.Map
@@ -693,9 +743,9 @@ index b6321e4..f9a608e 100644
  	tcpListenerMap   bool
  	programsExposed  bool
  	control          tcControl
-+	delivery                  string
-+	tcxPosition               string
-+	tcxPriority               uint16
++	delivery         string
++	tcxPosition      string
++	tcxPriority      uint16
  	controlMapFD     int
  	flowStore        tcFlowStore
  	selfMapExternal  bool
@@ -703,9 +753,9 @@ index b6321e4..f9a608e 100644
  		controlValue.Flags |= tcFlagSharedBypassIPv6
  	}
  	backend := &TCBackend{
-+		delivery:           config.Delivery,
-+		tcxPosition:        config.TCXPosition,
-+		tcxPriority:        config.TCXPriority,
++		delivery:       config.Delivery,
++		tcxPosition:    config.TCXPosition,
++		tcxPriority:    config.TCXPriority,
  		runtime:        &tcRuntime{maps: maps, programs: loadedPrograms},
  		tcpListenerMap: config.EnableTCP && !legacyTCP,
  		control:        controlValue,
@@ -1153,7 +1203,7 @@ index 31d06ac..8d1bb27 100644
  				if added {
  					return E.Errors(err, closeTCXRoleLink(attachment, local))
 diff --git a/runtime/tc_delivery.go b/runtime/tc_delivery.go
-index 40d3943..a57489f 100644
+index 40d3943..ef4b7c0 100644
 --- a/runtime/tc_delivery.go
 +++ b/runtime/tc_delivery.go
 @@ -4,13 +4,16 @@ package runtime
@@ -1215,7 +1265,7 @@ index 40d3943..a57489f 100644
  		}
  		_, redirectErr := netlink.LinkByName(redirectName)
  		_, deliveryErr := netlink.LinkByName(deliveryName)
-@@ -69,6 +93,79 @@ func nextTCVethNames() (string, string, error) {
+@@ -69,6 +93,77 @@ func nextTCVethNames() (string, string, error) {
  	return "", "", E.New("unable to allocate TC eBPF delivery link name")
  }
  
@@ -1226,7 +1276,6 @@ index 40d3943..a57489f 100644
 +	}
 +	return hex.EncodeToString(raw)[:length], nil
 +}
-+
 +
 +// attachTCDeliveryHook attaches one delivery hook, preferring TCX and falling
 +// back to clsact when TCX is unavailable on this kernel or hook. The delivery
@@ -1252,7 +1301,6 @@ index 40d3943..a57489f 100644
 +	}
 +	return nil, filter, nil
 +}
-+
 +
 +func deliveryHookAttached(attached tcxAttachedLink, filter *netlink.BpfFilter, device netlink.Link,
 +	name string, handle, priority uint16) (bool, error) {
@@ -1359,7 +1407,7 @@ index 0000000..8543573
 +	}
 +}
 diff --git a/runtime/tc_isolated_delivery.go b/runtime/tc_isolated_delivery.go
-index 89c53ff..b9340a1 100644
+index 89c53ff..d9dcc4b 100644
 --- a/runtime/tc_isolated_delivery.go
 +++ b/runtime/tc_isolated_delivery.go
 @@ -51,10 +51,6 @@ func (d *tcDataPlane) inNamespace(block func() error) error {
@@ -1456,6 +1504,15 @@ index 89c53ff..b9340a1 100644
  		return cleanup(E.New("invalid TC namespace peer MAC"))
  	}
  	if err = d.backend.SetDeliveryInterface(uint32(owner.redirect.Attrs().Index), mac); err != nil {
+@@ -160,7 +151,7 @@ func (d *tcDeliveryLink) configureIsolatedPeer(repair bool) (bool, error) {
+ 	}
+ 	for _, setting := range []struct {
+ 		path, value string
+-		optional   bool
++		optional    bool
+ 	}{
+ 		{path: tcInterfaceSysctlPath("all", "rp_filter"), value: "0"}, {path: tcInterfaceSysctlPath("default", "rp_filter"), value: "0"},
+ 		{path: tcInterfaceSysctlPath(d.deliveryName, "rp_filter"), value: "0"}, {path: tcInterfaceSysctlPath(d.deliveryName, "accept_local"), value: "1"},
 @@ -231,24 +222,30 @@ func (d *tcDeliveryLink) configureIsolatedPeer(repair bool) (bool, error) {
  				}
  			}
