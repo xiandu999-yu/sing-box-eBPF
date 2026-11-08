@@ -1,5 +1,5 @@
 diff --git a/adapter/ebpf.go b/adapter/ebpf.go
-index 7b8c07fb..881d0d2b 100644
+index 3fdb5207..1a2eb3d9 100644
 --- a/adapter/ebpf.go
 +++ b/adapter/ebpf.go
 @@ -80,6 +80,7 @@ type EBPFRuntimeDiagnostics struct {
@@ -227,7 +227,7 @@ index bf144ad4..48a55ebc 100644
  
  type CacheFileOptions struct {
 diff --git a/protocol/ebpf/diagnostics_api.go b/protocol/ebpf/diagnostics_api.go
-index ff161729..98d2cb22 100644
+index 372e80de..6b651147 100644
 --- a/protocol/ebpf/diagnostics_api.go
 +++ b/protocol/ebpf/diagnostics_api.go
 @@ -69,6 +69,7 @@ func diagnosticsForAPI(diagnostics EBPFDiagnostics) adapter.EBPFRuntimeDiagnosti
@@ -251,10 +251,10 @@ index b9bb3b25..191d8302 100644
  	TCRoutingTable                int        `json:"tc_routing_table,omitempty"`
  	TCRoutingPriority             int        `json:"tc_routing_priority,omitempty"`
 diff --git a/protocol/ebpf/diagnostics_render.go b/protocol/ebpf/diagnostics_render.go
-index dd0235d6..39d8756b 100644
+index 19aaf4b7..911a3d4b 100644
 --- a/protocol/ebpf/diagnostics_render.go
 +++ b/protocol/ebpf/diagnostics_render.go
-@@ -173,6 +173,9 @@ func (i *Inbound) logStartupSummaryLocked() {
+@@ -176,6 +176,9 @@ func (i *Inbound) logStartupSummaryLocked() {
  		}
  	}
  
@@ -264,7 +264,7 @@ index dd0235d6..39d8756b 100644
  	i.logger.Info("eBPF ", ebpfStructuredEvent("inbound_start", map[string]any{
  		"state":              diagnostics.State,
  		"configured_paths":   paths,
-@@ -180,5 +183,8 @@ func (i *Inbound) logStartupSummaryLocked() {
+@@ -183,5 +186,8 @@ func (i *Inbound) logStartupSummaryLocked() {
  		"waiting_paths":      waiting,
  		"waiting_interfaces": waitingInterfaces,
  		"fakeip_icmp":        fakeIPICMPSummary,
@@ -274,7 +274,7 @@ index dd0235d6..39d8756b 100644
  	}))
  }
 diff --git a/protocol/ebpf/diagnostics_snapshot.go b/protocol/ebpf/diagnostics_snapshot.go
-index 539434ae..bfc99aac 100644
+index 84f4c7a1..c6d1bff1 100644
 --- a/protocol/ebpf/diagnostics_snapshot.go
 +++ b/protocol/ebpf/diagnostics_snapshot.go
 @@ -96,6 +96,7 @@ func (i *Inbound) diagnosticsLocked() EBPFDiagnostics {
@@ -286,7 +286,7 @@ index 539434ae..bfc99aac 100644
  		diagnostics.TCRoutingTable = tc.NetworkInfo.RoutingTable
  		diagnostics.TCRoutingPriority = tc.NetworkInfo.RoutingPriority
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
-index 0d5a9720..45d1b40e 100644
+index 55e1e323..f577d904 100644
 --- a/protocol/ebpf/inbound.go
 +++ b/protocol/ebpf/inbound.go
 @@ -29,6 +29,11 @@ const (
@@ -309,7 +309,7 @@ index 0d5a9720..45d1b40e 100644
  	localRoutes            *commonEBPF.LocalRouteSet
  	selfBypass             *commonEBPF.SelfBypass
  	processTracker         processTrackerOwner
-@@ -163,10 +169,14 @@ type Inbound struct {
+@@ -166,10 +172,14 @@ type Inbound struct {
  	sharedIPv6                bool
  	sharedBypassPrivate       bool
  	localBypassPort           []portRange
@@ -324,7 +324,7 @@ index 0d5a9720..45d1b40e 100644
  	fakeIPIPv4Prefix          netip.Prefix
  	fakeIPIPv6Prefix          netip.Prefix
  	fakeIPICMPReply           bool
-@@ -293,6 +303,24 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -302,6 +312,24 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  			return nil, E.New("eBPF self-bypass sockets were not prepared")
  		}
  	}
@@ -349,7 +349,7 @@ index 0d5a9720..45d1b40e 100644
  	inbound := &Inbound{
  		Adapter:        inbound.NewAdapter(C.TypeEBPF, tag),
  		ctx:            ctx,
-@@ -321,10 +349,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -330,10 +358,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  		sharedIPv6:          sharedEnabled && enabledByDefault(options.Shared.IPv6),
  		sharedBypassPrivate: options.Shared.BypassPrivateAddress == nil || *options.Shared.BypassPrivateAddress,
  		localBypassPort:     localBypassPort,
@@ -364,7 +364,7 @@ index 0d5a9720..45d1b40e 100644
  		sharedIncludeMAC:    sharedIncludeMAC,
  		sharedExcludeMAC:    sharedExcludeMAC,
  		localPolicy: localUIDPolicy{
-@@ -419,3 +451,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
+@@ -429,3 +461,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
  		break
  	}
  }
@@ -420,7 +420,7 @@ index 0d5a9720..45d1b40e 100644
 +	return priority, position, nil
 +}
 diff --git a/protocol/ebpf/inbound_connection.go b/protocol/ebpf/inbound_connection.go
-index fd60c7aa..63cc4402 100644
+index 4118e0c1..4b373c35 100644
 --- a/protocol/ebpf/inbound_connection.go
 +++ b/protocol/ebpf/inbound_connection.go
 @@ -8,6 +8,7 @@ import (
@@ -505,7 +505,7 @@ index 7f06bc5d..0eb8cf2e 100644
  	if err != nil {
  		return err
 diff --git a/protocol/ebpf/lifecycle_start.go b/protocol/ebpf/lifecycle_start.go
-index e789b399..ba5c8358 100644
+index aaf467a4..f4e8a550 100644
 --- a/protocol/ebpf/lifecycle_start.go
 +++ b/protocol/ebpf/lifecycle_start.go
 @@ -113,6 +113,13 @@ func (i *Inbound) startInbound() error {
@@ -532,7 +532,7 @@ index e789b399..ba5c8358 100644
  		EnableLocal:       localEnabled,
  		EnableShared:      sharedEnabled,
  		EnableIPv4:        true,
-@@ -531,3 +541,25 @@ func combineStartError(startErr error, cleanupErr error) error {
+@@ -527,3 +537,25 @@ func combineStartError(startErr error, cleanupErr error) error {
  	}
  	return E.Errors(startErr, E.Cause(cleanupErr, "cleanup eBPF inbound"))
  }
@@ -559,7 +559,7 @@ index e789b399..ba5c8358 100644
 +	return err
 +}
 diff --git a/protocol/ebpf/tc_connection.go b/protocol/ebpf/tc_connection.go
-index 2cff9f38..f590dd3f 100644
+index 212f468c..6b5a3a09 100644
 --- a/protocol/ebpf/tc_connection.go
 +++ b/protocol/ebpf/tc_connection.go
 @@ -8,6 +8,7 @@ import (

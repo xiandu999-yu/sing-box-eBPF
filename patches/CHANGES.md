@@ -14,17 +14,21 @@
 
 ---
 
-## 0. 基准：`d3217e2` / 模块 `1af55b7a`（2026-11-07）
+## 0. 基准：`91bc15bf` / 模块 `e4ac4ff8`（2026-11-09）
 
 `ci/pins.env` 现在是：
 
 | 固定点 | commit | 内容 |
 | --- | --- | --- |
-| `SING_BOX_COMMIT` | `d3217e29` `deps(ebpf): adopt userspace release cleanup contract` | 相对 `ed2bdc8` 只改了 `go.mod` / `go.sum`（模块固定点前移到 `1af55b7a`），代码结构没变，补丁原样套用 |
-| `MODULE_COMMIT` | `1af55b7a` `fix(self-bypass): clean up userspace release registrations` | `SelfBypassUserspaceRelease` 的 `CleanupMode()` 改为 `userspace_unregister`；`UnregisterSocket` 在没有内核 release 钩子时也删条目，删除本身幂等（双清理路径） |
+| `SING_BOX_COMMIT` | `91bc15bf` `remove self-bypass mark diagnostics` | 相对 `d3217e2` 是 **17 个 commit**：self-bypass 路径重做（先试 socket mark 又整体回退）、UDP generation 隔离、rule-set 策略合并、策略校验收紧、diagnostics schema 升级、`config.go` / `inbound_policy.go` 拆分。补丁零冲突，17 个文件原样套用 |
+| `MODULE_COMMIT` | `e4ac4ff8` `remove socket-mark self-bypass path` | 相对 `1af55b7a`：`self_bypass.go` 大改（`RegisterSocketCookie` / `UnregisterCookie`）、`CgroupConfig` 新增 `selfBypass *SelfBypass`、cgroup storage 与 shared 回程修复、生成物行尾可移植 |
 
-再往前一跳是 `2f42c08` → `ed2bdc8`（`fix(ebpf): register packet listeners after bind`）：上游把 eBPF inbound
-拆成了三个内嵌结构体，补丁是按新结构重做的，不是简单 rebase：
+这一跳补丁只在 **一个地方**需要手工合并：`internal/core/cgroup_abi.go` 的 `CgroupConfig`——
+上游新增了 `selfBypass *SelfBypass`，和我们的 `BypassProcess` / `MarkerOnly` 落在同一个位置，
+两边都保留。其余 24 个文件零冲突。
+
+再往前两跳（`2f42c08` → `ed2bdc8` → `d3217e2`）的记录：`ed2bdc8` 把 eBPF inbound
+拆成三个内嵌结构体，补丁是按新结构重做的；`d3217e2` 只改 `go.mod` / `go.sum`。
 
 | 上游改动 | 补丁的应对 |
 | --- | --- |
@@ -37,14 +41,14 @@
 照样能"应用成功"，所以逐个断言关键改动还在真正生效的代码上（尤其是缝在
 `repairTCInfrastructure` 里的 `tc_repair` 探针）。
 
-模块这侧本轮只做了两件事：把模块补丁挪到 `1af55b7a`（25 个文件，零冲突），
-顺手 `gofmt`（之前几处结构体对齐不合规）。`SelfBypass.RegisterSocket` /
-`RemoveAssignmentIfMatch` / `LastRepair` / `DeliveryKind` 和按次统计的 UDP admission 计数
-（token / peer / recovery）在 `1af55b7a` 里都还在，补丁不需要额外接口。
+`SelfBypass.RegisterSocket` / `UnregisterSocket` / `RemoveAssignmentIfMatch` / `LastRepair` /
+`DeliveryKind` 和按次统计的 UDP admission 计数（token / peer / recovery）在 `e4ac4ff8` 里都还在，
+补丁不需要额外接口。
 
-组装结果已实测编译通过：`d3217e2` + 两份补丁 + `go mod replace ../module`，
+组装结果已实测编译通过：`91bc15bf` + 两份补丁 + `go mod replace ../module`，
 `-tags with_ebpf,with_clash_api,with_quic,with_utls,with_gvisor,with_wireguard,badlinkname`；
-`sing-box check` 用带 `bypass_process` / `netkit-l3` / `socket_assign` 的配置跑通。
+`sing-box check` 用带 `bypass_process` / `netkit-l3` / `socket_assign` 的配置跑通，
+非法 `delivery` 仍然被拒。
 
 ---
 
