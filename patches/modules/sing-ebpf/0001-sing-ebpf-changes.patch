@@ -60,10 +60,10 @@ index 0000000..0ef39f6
 +          if-no-files-found: error
 +          retention-days: 7
 diff --git a/api.go b/api.go
-index 6af1c94..5a0f907 100644
+index a700ab5..d43e112 100644
 --- a/api.go
 +++ b/api.go
-@@ -142,6 +142,14 @@ type SelfBypass struct {
+@@ -143,6 +143,14 @@ type SelfBypass struct {
  	core.SelfBypassHandle
  }
  
@@ -78,7 +78,7 @@ index 6af1c94..5a0f907 100644
  func NewSelfBypass() (*SelfBypass, error) {
  	backend, err := core.NewSelfBypass()
  	if err != nil {
-@@ -237,22 +245,72 @@ type CgroupConfig struct {
+@@ -245,22 +253,72 @@ type CgroupConfig struct {
  	UDPTimeout   time.Duration
  	Policy       CompiledPolicy
  	SelfBypass   *SelfBypass
@@ -160,7 +160,7 @@ index 6af1c94..5a0f907 100644
  type ProcessTrackerConfig struct {
  	EnableTCP    bool
  	EnableUDP    bool
-@@ -274,15 +332,21 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error)
+@@ -282,15 +340,21 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error)
  
  type TCConfig struct {
  	// TCP and UDP preserve their tuples in a required private listener namespace.
@@ -191,7 +191,7 @@ index 6af1c94..5a0f907 100644
  	Policy             CompiledPolicy
  	RoutingMark        uint32
  	SelfBypass         *SelfBypass
-@@ -307,6 +371,9 @@ func PrepareTC(config TCConfig) (*TCBackend, error) {
+@@ -315,6 +379,9 @@ func PrepareTC(config TCConfig) (*TCBackend, error) {
  		EnableTCP:          config.EnableTCP,
  		EnableUDP:          config.EnableUDP,
  		DeliveryInterface:  config.DeliveryInterface,

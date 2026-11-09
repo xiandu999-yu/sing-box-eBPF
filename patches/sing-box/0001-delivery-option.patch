@@ -1,8 +1,8 @@
 diff --git a/adapter/ebpf.go b/adapter/ebpf.go
-index 3fdb5207..1a2eb3d9 100644
+index 68923a99..18aa7e83 100644
 --- a/adapter/ebpf.go
 +++ b/adapter/ebpf.go
-@@ -80,6 +80,7 @@ type EBPFRuntimeDiagnostics struct {
+@@ -81,6 +81,7 @@ type EBPFRuntimeDiagnostics struct {
  	TCBackendMode                 string
  	TCListenerLookupMode          string
  	TCAttachmentMode              string
@@ -227,10 +227,10 @@ index bf144ad4..48a55ebc 100644
  
  type CacheFileOptions struct {
 diff --git a/protocol/ebpf/diagnostics_api.go b/protocol/ebpf/diagnostics_api.go
-index 372e80de..6b651147 100644
+index 04d6dabc..1f1c3cc6 100644
 --- a/protocol/ebpf/diagnostics_api.go
 +++ b/protocol/ebpf/diagnostics_api.go
-@@ -69,6 +69,7 @@ func diagnosticsForAPI(diagnostics EBPFDiagnostics) adapter.EBPFRuntimeDiagnosti
+@@ -70,6 +70,7 @@ func diagnosticsForAPI(diagnostics EBPFDiagnostics) adapter.EBPFRuntimeDiagnosti
  		TCDeliveryInterface:           diagnostics.TCDeliveryInterface,
  		TCNetworkNamespace:            diagnostics.TCNetworkNamespace,
  		TCDeliveryInterfaceIndex:      diagnostics.TCDeliveryInterfaceIndex,
@@ -239,10 +239,10 @@ index 372e80de..6b651147 100644
  		TCRoutingTable:                diagnostics.TCRoutingTable,
  		TCRoutingPriority:             diagnostics.TCRoutingPriority,
 diff --git a/protocol/ebpf/diagnostics_model.go b/protocol/ebpf/diagnostics_model.go
-index b9bb3b25..191d8302 100644
+index 6e686af4..15c1b600 100644
 --- a/protocol/ebpf/diagnostics_model.go
 +++ b/protocol/ebpf/diagnostics_model.go
-@@ -150,6 +150,7 @@ type EBPFDiagnostics struct {
+@@ -151,6 +151,7 @@ type EBPFDiagnostics struct {
  	TCDeliveryInterface           string     `json:"tc_delivery_interface,omitempty"`
  	TCNetworkNamespace            string     `json:"tc_network_namespace,omitempty"`
  	TCDeliveryInterfaceIndex      int        `json:"tc_delivery_interface_index,omitempty"`
@@ -274,10 +274,10 @@ index 19aaf4b7..911a3d4b 100644
  	}))
  }
 diff --git a/protocol/ebpf/diagnostics_snapshot.go b/protocol/ebpf/diagnostics_snapshot.go
-index 84f4c7a1..c6d1bff1 100644
+index a678e7da..1ccf04a1 100644
 --- a/protocol/ebpf/diagnostics_snapshot.go
 +++ b/protocol/ebpf/diagnostics_snapshot.go
-@@ -96,6 +96,7 @@ func (i *Inbound) diagnosticsLocked() EBPFDiagnostics {
+@@ -97,6 +97,7 @@ func (i *Inbound) diagnosticsLocked() EBPFDiagnostics {
  		diagnostics.TCDeliveryInterface = tc.NetworkInfo.DeliveryInterface
  		diagnostics.TCNetworkNamespace = tc.NetworkInfo.Namespace
  		diagnostics.TCDeliveryInterfaceIndex = tc.NetworkInfo.DeliveryInterfaceIndex
@@ -420,7 +420,7 @@ index 55e1e323..f577d904 100644
 +	return priority, position, nil
 +}
 diff --git a/protocol/ebpf/inbound_connection.go b/protocol/ebpf/inbound_connection.go
-index 4118e0c1..4b373c35 100644
+index f4bb5f4b..7b3a9acd 100644
 --- a/protocol/ebpf/inbound_connection.go
 +++ b/protocol/ebpf/inbound_connection.go
 @@ -8,6 +8,7 @@ import (

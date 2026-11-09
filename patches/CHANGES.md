@@ -14,21 +14,24 @@
 
 ---
 
-## 0. 基准：`91bc15bf` / 模块 `e4ac4ff8`（2026-11-09）
+## 0. 基准：`949d0cea` / 模块 `bec0ab94`（2026-11-09）
 
 `ci/pins.env` 现在是：
 
 | 固定点 | commit | 内容 |
 | --- | --- | --- |
-| `SING_BOX_COMMIT` | `91bc15bf` `remove self-bypass mark diagnostics` | 相对 `d3217e2` 是 **17 个 commit**：self-bypass 路径重做（先试 socket mark 又整体回退）、UDP generation 隔离、rule-set 策略合并、策略校验收紧、diagnostics schema 升级、`config.go` / `inbound_policy.go` 拆分。补丁零冲突，17 个文件原样套用 |
-| `MODULE_COMMIT` | `e4ac4ff8` `remove socket-mark self-bypass path` | 相对 `1af55b7a`：`self_bypass.go` 大改（`RegisterSocketCookie` / `UnregisterCookie`）、`CgroupConfig` 新增 `selfBypass *SelfBypass`、cgroup storage 与 shared 回程修复、生成物行尾可移植 |
+| `SING_BOX_COMMIT` | `949d0cea` `update sing-ebpf fallback diagnostics` | 相对 `91bc15bf` 是 3 个 commit：self-bypass dial 生命周期、恢复 cgroup 地址旁路、fallback 诊断。补丁零冲突 |
+| `MODULE_COMMIT` | `bec0ab94` `report self-bypass fallback failures` | 相对 `e4ac4ff8` 是 3 个 commit：回收已关闭的 self-bypass socket、恢复 cookie 清理的 cgroup 地址旁路、`FallbackReason()` + `SelfBypassCgroupSocketAddr` 模式。补丁零冲突 |
 
-这一跳补丁只在 **一个地方**需要手工合并：`internal/core/cgroup_abi.go` 的 `CgroupConfig`——
-上游新增了 `selfBypass *SelfBypass`，和我们的 `BypassProcess` / `MarkerOnly` 落在同一个位置，
-两边都保留。其余 24 个文件零冲突。
+这一跳上游仍在 self-bypass 上收尾，但都没碰到我们的改动点：`bypass_process` 的
+LPM 表、marker-only 钩子、`delivery`/`tcx_*` 全部原样套用。需要注意的是 sing-box 侧
+`selfBypassUsesUserspaceRegistration()` 现在把 `SelfBypassCgroupSocketAddr` 也算作
+"需要用户态注册"——这是上游自己的判断，我们的 `RegisterSocket`/`UnregisterSocket` 调用点
+不需要跟着改。
 
-再往前两跳（`2f42c08` → `ed2bdc8` → `d3217e2`）的记录：`ed2bdc8` 把 eBPF inbound
-拆成三个内嵌结构体，补丁是按新结构重做的；`d3217e2` 只改 `go.mod` / `go.sum`。
+更早的几跳：`91bc15bf`（17 个 commit，self-bypass 先试 socket-mark 又回退、UDP generation
+隔离、策略合并、diagnostics schema）需要手工合并模块 `CgroupConfig` 一处；`ed2bdc8`
+把 eBPF inbound 拆成三个内嵌结构体，补丁按新结构重做；`d3217e2` 只改 `go.mod` / `go.sum`。
 
 | 上游改动 | 补丁的应对 |
 | --- | --- |
@@ -36,19 +39,20 @@
 | 数据面启动拆成 `startCgroupDataPlane` / `startTCDataPlane` / `startSharedRewriteDataPlane` / `startTCListenersIfNeeded` | `delivery` / `tcx_*` 改为在 `startTCDataPlane` 里写进 `TCConfig`；marker-only 钩子挂在 cgroup 数据面之后的分支上 |
 | 监听器移到 `common/listener`，socket 注册改为 bind 成功之后 | 无需改动，属于上游自己的修复 |
 | `lifecycleAccess` 互斥量 + `logStartupSummaryLocked` / `runtimeSnapshotLocked` | 启动日志的三个字段（`delivery` / `delivery_used` / `bypass_process`）跟着搬进新函数 |
+| `CgroupConfig` 新增 `selfBypass *SelfBypass` | 与我们的 `BypassProcess` / `MarkerOnly` 落在同一字段块，两边都保留 |
 
 `assemble-source` 里加了 **Verify patch anchors** 一步：补丁是行级 diff，上游再把函数挪走时
 照样能"应用成功"，所以逐个断言关键改动还在真正生效的代码上（尤其是缝在
 `repairTCInfrastructure` 里的 `tc_repair` 探针）。
 
-`SelfBypass.RegisterSocket` / `UnregisterSocket` / `RemoveAssignmentIfMatch` / `LastRepair` /
-`DeliveryKind` 和按次统计的 UDP admission 计数（token / peer / recovery）在 `e4ac4ff8` 里都还在，
-补丁不需要额外接口。
+`SelfBypass.RegisterSocket` / `UnregisterSocket` / `FallbackReason` / `RemoveAssignmentIfMatch` /
+`LastRepair` / `DeliveryKind` 和按次统计的 UDP admission 计数（token / peer / recovery）在
+`bec0ab94` 里都还在，补丁不需要额外接口。
 
-组装结果已实测编译通过：`91bc15bf` + 两份补丁 + `go mod replace ../module`，
+组装结果已实测编译通过：`949d0cea` + 两份补丁 + `go mod replace ../module`，
 `-tags with_ebpf,with_clash_api,with_quic,with_utls,with_gvisor,with_wireguard,badlinkname`；
 `sing-box check` 用带 `bypass_process` / `netkit-l3` / `socket_assign` 的配置跑通，
-非法 `delivery` 仍然被拒。
+非法 `delivery` 与非法 `tcx_position` 仍然被拒。
 
 ---
 
