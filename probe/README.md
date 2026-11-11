@@ -84,7 +84,7 @@ cross-netns: PASS（cookie=true）
 失败时会打印内核 verifier 日志（`LogLevelBranch|LogLevelStats` + `VerifierError.Log` 全文），
 `unsatisfied map reference` 这类是用户态装载方式的问题，不是内核拒绝。
 
-> 2026-11-11 修过三次：
+> 2026-11-11 修过四次：
 > 1. 最早直接 `ebpf.NewProgram(progSpec)` 单程序装载，程序里的 map 重定位没有被替换成
 >    map fd，内核侧报 `instruction N: unsatisfied map reference`。现在改成“每个程序各自
 >    一个只含单个程序的 collection”，map 由 collection 统一创建并解析引用。
@@ -96,6 +96,10 @@ cross-netns: PASS（cookie=true）
 >    `Unreleased reference` / `reference leak`。现在程序不再预查表，命中/未命中直接看
 >    `bpf_sk_redirect_hash()` 的返回值（`SK_PASS`=命中并已重定向，`SK_DROP`=未命中），
 >    两条路径都返回 `SK_PASS`，未命中时数据按普通路径投递，不会静默丢包。
+> 4. **attach 的目标是 SOCKHASH map 的 fd，不是 socket fd**：内核走
+>    `bpf_prog_attach -> sock_map_get_from_fd`，把程序存进 map 的
+>    `progs.verdict`；传 socket fd 会得到 `EINVAL`。顺序也必须是
+>    **先 attach 到 map、再插入 socket**，这样 socket 插入时创建的 psock 才带上程序。
 
 ## 文件
 

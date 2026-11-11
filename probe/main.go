@@ -332,6 +332,16 @@ func runScenario(e *env, chunkMB int) error {
 		return errors.New("collection 里缺 map 或程序")
 	}
 
+	// 顺序很重要：先挂程序、再插 socket。verdict 程序存在 map 的 progs.verdict 里，
+	// socket 插入时创建的 psock 才会带上它。
+	// 另外 target 是 **map fd**（bpf_prog_attach -> sock_map_get_from_fd），
+	// 不是单个 socket —— 传 socket fd 会得到 EINVAL。
+	detach, err := attach(sockMap.FD(), prog)
+	if err != nil {
+		return fmt.Errorf("attach program to sockmap: %w", err)
+	}
+	defer detach()
+
 	if useCookie {
 		lc, err := socketCookie(lfd)
 		if err != nil {
@@ -350,27 +360,13 @@ func runScenario(e *env, chunkMB int) error {
 		}
 	} else {
 		// 固定 key：数据到达 L 时用 key=0 查表，命中值 R 即转发给 R 发送。
-		// 另外把 L 以 key=1 放进同一张 map —— socket 必须先成为 map 的成员
-		// 才会挂上 psock，否则 verdict 程序无法 attach。
+		// 另外把 L 以 key=1 放进同一张 map，让它也带上 psock。
 		if err := sockMap.Update(&probeKey{Cookie: 0}, uint32(rfd), 0); err != nil {
 			return fmt.Errorf("map fixed->R: %w", err)
 		}
 		if err := sockMap.Update(&probeKey{Cookie: 1}, uint32(lfd), 0); err != nil {
 			return fmt.Errorf("map fixed->L: %w", err)
 		}
-	}
-
-	lLink, err := attach(lfd, prog)
-	if err != nil {
-		return fmt.Errorf("attach L: %w", err)
-	}
-	defer lLink()
-	if useCookie {
-		rLink, err := attach(rfd, prog)
-		if err != nil {
-			return fmt.Errorf("attach R: %w", err)
-		}
-		defer rLink()
 	}
 
 	if err := e.ping(useCookie); err != nil {
@@ -499,9 +495,9 @@ func loadSingle(spec *ebpf.CollectionSpec, name string) (*ebpf.Collection, error
 	return collection, nil
 }
 
-func attach(fd int, prog *ebpf.Program) (func(), error) {
+func attach(target int, prog *ebpf.Program) (func(), error) {
 	err := link.RawAttachProgram(link.RawAttachProgramOptions{
-		Target:  fd,
+		Target:  target,
 		Program: prog,
 		Attach:  ebpf.AttachSkSKBStreamVerdict,
 	})
@@ -510,7 +506,7 @@ func attach(fd int, prog *ebpf.Program) (func(), error) {
 	}
 	return func() {
 		_ = link.RawDetachProgram(link.RawDetachProgramOptions{
-			Target:  fd,
+			Target:  target,
 			Program: prog,
 			Attach:  ebpf.AttachSkSKBStreamVerdict,
 		})
