@@ -455,6 +455,7 @@ func (e *env) throughput(chunkMB int, bidirectional bool) error {
 	_ = e.server.SetDeadline(deadline)
 
 	start := time.Now()
+	cpuStart := cpuTime()
 	errCh := make(chan error, 1)
 	go func() {
 		_, err := io.CopyN(io.Discard, e.server, total)
@@ -475,10 +476,28 @@ func (e *env) throughput(chunkMB int, bidirectional bool) error {
 		return fmt.Errorf("吞吐读: %w", err)
 	}
 	elapsed := time.Since(start)
+	cpu := cpuTime() - cpuStart
 	mbps := float64(total) * 8 / elapsed.Seconds() / 1e6
-	fmt.Printf("throughput client→server: %.1f MiB in %s = %.1f Mbps（单向，%v）\n",
-		float64(total)/(1<<20), elapsed.Round(time.Millisecond), mbps, bidirectional)
+	// CPU 时间才是可比指标：吞吐会被 loopback / 调度天花板压住，两边一样。
+	var perCPU float64
+	if cpu > 0 {
+		perCPU = float64(total) / (1 << 20) / cpu.Seconds()
+	}
+	fmt.Printf("throughput client→server: %.1f MiB in %s = %.1f Mbps, cpu=%s (%.0f MiB/cpu-s)（单向，%v）\n",
+		float64(total)/(1<<20), elapsed.Round(time.Millisecond), mbps,
+		cpu.Round(time.Millisecond), perCPU, bidirectional)
 	return nil
+}
+
+// cpuTime 返回本进程的 user+sys 时间；基线（用户态转发）和卸载（内核重定向）
+// 都跑在同一个进程里，用它能公平比较每 MiB 的 CPU 成本。
+func cpuTime() time.Duration {
+	var usage unix.Rusage
+	if err := unix.Getrusage(unix.RUSAGE_SELF, &usage); err != nil {
+		return 0
+	}
+	return time.Duration(usage.Utime.Sec+usage.Stime.Sec)*time.Second +
+		time.Duration(usage.Utime.Usec+usage.Stime.Usec)*time.Microsecond
 }
 
 // ---------- eBPF 小工具 ----------

@@ -44,7 +44,9 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o tcp-offload-probe .
 ./tcp-offload-probe -mode cross -keep
 ```
 
-## 实测（2026-11-11，OpenWrt R6S）
+## 实测（2026-11-11，OpenWrt R6S，kernel 6.18.60 arm64）
+
+第一次（`-mode both -mb 64`）：
 
 ```
 === same-netns ===
@@ -63,15 +65,28 @@ kernel counters: verdict_calls=1090 cookie_nonzero=1090 redirect_ok=1090 redirec
 cross-netns: PASS（cookie=true）
 ```
 
+第二次（同样的 `-mode both -mb 64`，多了内核版本行）：
+
+```
+kernel: 6.18.60 arm64
+=== same-netns ===
+throughput client→server: 64.0 MiB in 507ms = 1058.8 Mbps（单向，true）
+same-netns: PASS（cookie=true）
+=== cross-netns ===
+throughput client→server: 64.0 MiB in 588ms = 912.4 Mbps（单向，true）
+cross-netns: PASS（cookie=true）
+```
+
 结论：
 
 - **核心未知全部消除**：`sk_skb` verdict 里 `bpf_get_socket_cookie` 可用；`bpf_sk_redirect_hash`
   的 egress 语义成立（`redirect_ok=1090`、`redirect_miss=0`）；**跨 netns 也成立**——这正是
   生产拓扑（私有交付 netns 的监听 socket ↔ 主 netns 的出站 socket）。
+- 内核 6.18.60 远在 CVE-2025-38165 修复矩阵（6.15.3）之上。
 - 两次的 `verdict_calls=1090` 对应 64 MiB，说明 psock 是批量交付（≈61 KB/次），不是逐包。
-- 吞吐数字**不能当结论**：两个场景都是 loopback，且同一份数据在同一台机器上跑两次
-  差 14 倍（1121 vs 16572 Mbps），说明这组数字被调度/窗口/缓存噪声主导。要判断
-  “省了多少”，必须跑 `-baseline` 在同一台机器上做 A/B。
+- 吞吐数字**不能当结论**：第一次 cross 的 16572 Mbps 是噪声（第二次同一条命令只有 912 Mbps），
+  两次都停在 ~1 Gbps，说明 loopback + 本探针的收发方式本身就是天花板。所以现在同时输出
+  **进程 user+sys CPU 时间**和 `MiB/cpu-s`，用 CPU 成本做 A/B，而不是看墙钟吞吐。
 
 还没证明的（都要 P1 才有答案）：真实网卡路径、用户态前缀冲刷、半关闭语义、
 积压保险丝、以及每连接两个 goroutine 的调度开销。
@@ -85,7 +100,7 @@ cross-netns: PASS（cookie=true）
 | 3 | 同 netns egress redirect | `client→server: ok` / `server→client: ok` | 两条都 ok | redirect 机制本身不通（helper 语义/attach 类型问题） |
 | 4 | 跨 netns redirect | `cross-netns: PASS` | ping/pong 双向都通 | 生产拓扑（私有 netns ↔ 主 netns）不可用，整个方案到此为止 |
 | 5 | 数据完整性 | `-mb N` 时写入字节 == 服务端读取字节 | 一致，无超时 | 中途丢数据 → 不能上生产 |
-| 6 | 吞吐 | `throughput ... Mbps` | 记下数字，和当前 splice 基线对比 | 低于基线说明走了 SK_PASS 回退或 redirect 无效 |
+| 6 | 吞吐 / CPU 成本 | `throughput ... Mbps, cpu=... (N MiB/cpu-s)` | 和 `-baseline` 的 `MiB/cpu-s` 比，≥ +25% 才值得做 | 低于基线或持平说明收益在探针噪声里 |
 | 7 | 资源清理 | 结束后 `ip netns list`、`ps`、`bpftool prog show` | 没有残留 `sbprobe`、没有残留程序 | 说明 attach/detach 生命周期有 bug |
 | 8 | 内核版本 | `uname -r` | 在修复矩阵之上 | 低于矩阵：即使测试通过也不要上生产 |
 
