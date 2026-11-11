@@ -81,6 +81,15 @@ cross-netns: PASS（cookie=true）
 - `服务端收不到（redirect 没生效 / 方向不对）` → 要素 3 不过，检查 attach 类型是否为 `SK_SKB_STREAM_VERDICT`、map value 是否为对端 fd。
 - `cross-netns: FAIL` 但 same 通过 → 要素 4 不过，这就是我们拓扑的致命项，直接停。
 
+失败时会打印内核 verifier 日志（`LogLevelBranch|LogLevelStats`），
+`unsatisfied map reference` 这类是用户态装载方式的问题，不是内核拒绝。
+
+> 2026-11-11 修过一次：最早直接 `ebpf.NewProgram(progSpec)` 单程序装载，
+> 程序里的 map 重定位没有被替换成 map fd，内核侧报
+> `instruction N: unsatisfied map reference`。现在改成“每个程序各自一个
+> 只含单个程序的 collection”，map 由 collection 统一创建并解析引用；
+> cookie 程序被 verifier 拒绝时，fixed 程序仍然能在自己的 collection 里单独装载。
+
 ## 文件
 
 | 文件 | 作用 |

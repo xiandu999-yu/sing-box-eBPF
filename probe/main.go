@@ -293,17 +293,6 @@ func runScenario(e *env, chunkMB int) error {
 	if err != nil {
 		return err
 	}
-	sockMap, err := ebpf.NewMap(spec.Maps["probe_sock"])
-	if err != nil {
-		return fmt.Errorf("create probe_sock: %w", err)
-	}
-	defer sockMap.Close()
-	statsMap, err := ebpf.NewMap(spec.Maps["probe_stats"])
-	if err != nil {
-		return fmt.Errorf("create probe_stats: %w", err)
-	}
-	defer statsMap.Close()
-
 	lfd, err := fdOf(e.listener)
 	if err != nil {
 		return err
@@ -314,17 +303,27 @@ func runScenario(e *env, chunkMB int) error {
 	}
 
 	useCookie := true
-	prog, err := loadProgram(spec, "probe_verdict_cookie")
+	collection, err := loadSingle(spec, "probe_verdict_cookie")
 	if err != nil {
 		fmt.Printf("cookie 程序加载失败: %v\n", err)
 		fmt.Println("退回到 fixed-key 程序（只测单方向 redirect）")
 		useCookie = false
-		prog, err = loadProgram(spec, "probe_verdict_fixed")
+		collection, err = loadSingle(spec, "probe_verdict_fixed")
 		if err != nil {
 			return fmt.Errorf("fixed 程序也加载失败: %w", err)
 		}
 	}
-	defer prog.Close()
+	defer collection.Close()
+	sockMap := collection.Maps["probe_sock"]
+	statsMap := collection.Maps["probe_stats"]
+	programName := "probe_verdict_cookie"
+	if !useCookie {
+		programName = "probe_verdict_fixed"
+	}
+	prog := collection.Programs[programName]
+	if sockMap == nil || statsMap == nil || prog == nil {
+		return errors.New("collection 里缺 map 或程序")
+	}
 
 	if useCookie {
 		lc, err := socketCookie(lfd)
@@ -343,8 +342,14 @@ func runScenario(e *env, chunkMB int) error {
 			return fmt.Errorf("map R->L: %w", err)
 		}
 	} else {
+		// 固定 key：数据到达 L 时用 key=0 查表，命中值 R 即转发给 R 发送。
+		// 另外把 L 以 key=1 放进同一张 map —— socket 必须先成为 map 的成员
+		// 才会挂上 psock，否则 verdict 程序无法 attach。
 		if err := sockMap.Update(&probeKey{Cookie: 0}, uint32(rfd), 0); err != nil {
 			return fmt.Errorf("map fixed->R: %w", err)
+		}
+		if err := sockMap.Update(&probeKey{Cookie: 1}, uint32(lfd), 0); err != nil {
+			return fmt.Errorf("map fixed->L: %w", err)
 		}
 	}
 
@@ -457,15 +462,28 @@ func loadSpec() (*ebpf.CollectionSpec, error) {
 	return ebpf.LoadCollectionSpecFromReader(bytes.NewReader(raw))
 }
 
-func loadProgram(spec *ebpf.CollectionSpec, name string) (*ebpf.Program, error) {
-	progSpec, ok := spec.Programs[name]
-	if !ok {
+// loadSingle 只把目标程序放进一个独立 collection：map 引用由 collection 统一解析，
+// 另一个程序即使 verifier 不接受也不会拖累这个。
+func loadSingle(spec *ebpf.CollectionSpec, name string) (*ebpf.Collection, error) {
+	if _, ok := spec.Programs[name]; !ok {
 		return nil, fmt.Errorf("程序 %s 不在对象里", name)
 	}
-	clone := progSpec.Copy()
-	clone.Type = ebpf.SkSKB
-	clone.AttachType = ebpf.AttachSkSKBStreamVerdict
-	return ebpf.NewProgram(clone)
+	clone := spec.Copy()
+	for other := range clone.Programs {
+		if other != name {
+			delete(clone.Programs, other)
+		}
+	}
+	collection, err := ebpf.NewCollectionWithOptions(clone, ebpf.CollectionOptions{
+		Programs: ebpf.ProgramOptions{
+			LogLevel:     ebpf.LogLevelBranch | ebpf.LogLevelStats,
+			LogSizeStart: 1 << 20,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return collection, nil
 }
 
 func attach(fd int, prog *ebpf.Program) (func(), error) {
