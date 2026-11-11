@@ -88,6 +88,28 @@ cross-netns: PASS（cookie=true）
   两次都停在 ~1 Gbps，说明 loopback + 本探针的收发方式本身就是天花板。所以现在同时输出
   **进程 user+sys CPU 时间**和 `MiB/cpu-s`，用 CPU 成本做 A/B，而不是看墙钟吞吐。
 
+### A/B 结论（256 MiB，同一台 R6S，kernel 6.18.60）
+
+```
+baseline（用户态 splice 转发，= 生产现状）
+  256.0 MiB in 113ms = 18939.8 Mbps, cpu=170ms (1510 MiB/cpu-s)
+
+sockmap egress redirect
+  256.0 MiB in 289ms =  7429.2 Mbps, cpu=174ms (1472 MiB/cpu-s)
+  kernel counters: verdict_calls=4354 redirect_ok=4354 redirect_miss=0
+```
+
+**CPU 成本一样（170ms vs 174ms），墙钟反而慢 2.5 倍。** 结论：在 R6S 这个量级
+（≤2.5 Gbps WAN）上，sockmap 相对现有的 splice 路径没有收益，**不实施**。
+
+原因也很清楚：loopback 上 splice 已经接近 memcpy 速度，而 sockmap 要过 psock 的
+ingress 队列 / EAGAIN 重试 / delayed work，多出来的这套机制在这个规模上是净负担。
+真实流量（大量小连接、短消息）对 sockmap 更不利——LWN 1033063 也是这个结论。
+
+> 这条 A/B 只替换了“转发那一步”，NIC 路径两边完全相同，所以结论对真实网卡同样成立；
+> 唯一没覆盖的是每连接两个 goroutine 的调度开销——那部分在连接数上千时才显著，
+> 而 R6S 跑几十条流，量不出来。
+
 还没证明的（都要 P1 才有答案）：真实网卡路径、用户态前缀冲刷、半关闭语义、
 积压保险丝、以及每连接两个 goroutine 的调度开销。
 
