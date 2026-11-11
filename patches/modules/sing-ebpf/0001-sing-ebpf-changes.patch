@@ -834,7 +834,7 @@ index 503dc7b..cb86aa3 100644
 +
  #endif
 diff --git a/native/cgroup.bpf.c b/native/cgroup.bpf.c
-index ceec1c4..4a5afd3 100644
+index ceec1c4..f4ab808 100644
 --- a/native/cgroup.bpf.c
 +++ b/native/cgroup.bpf.c
 @@ -80,6 +80,7 @@ MAP(cgroup_uid_policy, struct sb_ebpf_uid_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE);
@@ -853,10 +853,10 @@ index ceec1c4..4a5afd3 100644
  static __u64 (*ktime_get_ns)(void) = (void *)BPF_FUNC_ktime_get_ns;
  static long (*ringbuf_output)(void *ringbuf, void *data, __u64 size, __u64 flags) =
      (void *)BPF_FUNC_ringbuf_output;
-@@ -171,6 +173,27 @@ INLINE bool is_direct_self_bypassed(const struct sb_ebpf_cgroup_control *config)
-     (void)config;
-     return false;
+@@ -173,6 +175,27 @@ INLINE bool is_direct_self_bypassed(const struct sb_ebpf_cgroup_control *config)
  #endif
+ }
+ 
 +// The decision is taken in the caller's context: cgroup connect/sendmsg hooks
 +// run as the task that issued the syscall, so bpf_get_current_comm names the
 +// program that owns the connection. Matched processes are never proxied.
@@ -878,9 +878,9 @@ index ceec1c4..4a5afd3 100644
 +    map_update(&cgroup_socket_bypass, &cookie, &metadata, 0U);
 +}
 +
- }
- 
  INLINE bool uid_bypassed(const struct sb_ebpf_cgroup_control *config) {
+     if ((config->flags & SB_EBPF_CGROUP_FLAG_UID_POLICY) == 0U) return false;
+     __u32 uid = network_order32((__u32)get_current_uid_gid());
 @@ -710,6 +733,13 @@ INLINE int handle_v4(
      const struct sb_ebpf_cgroup_control *config = control();
      if (config == 0) return 1;
