@@ -14,24 +14,29 @@
 
 ---
 
-## 0. 基准：`949d0cea` / 模块 `bec0ab94`（2026-11-09）
+## 0. 基准：`6dc5542f` / 模块 `d2983dce`（2026-11-11）
 
 `ci/pins.env` 现在是：
 
 | 固定点 | commit | 内容 |
 | --- | --- | --- |
-| `SING_BOX_COMMIT` | `949d0cea` `update sing-ebpf fallback diagnostics` | 相对 `91bc15bf` 是 3 个 commit：self-bypass dial 生命周期、恢复 cgroup 地址旁路、fallback 诊断。补丁零冲突 |
-| `MODULE_COMMIT` | `bec0ab94` `report self-bypass fallback failures` | 相对 `e4ac4ff8` 是 3 个 commit：回收已关闭的 self-bypass socket、恢复 cookie 清理的 cgroup 地址旁路、`FallbackReason()` + `SelfBypassCgroupSocketAddr` 模式。补丁零冲突 |
+| `SING_BOX_COMMIT` | `6dc5542f` `document socket-local self-bypass` | 相对 `949d0cea` 是 9 个 commit：socket-local 自旁路后端、direct TGID 自旁路、生命周期拆分与诊断、inbound 数据面文档。三处结构体冲突（`EBPFRuntimeDiagnostics` / `EBPFDiagnostics` / 映射函数），已按上游新字段重排 |
+| `MODULE_COMMIT` | `d2983dce` `test socket-local storage lifetime` | 相对 `bec0ab94` 是 9 个 commit、58 个文件：socket-local 自旁路存储（`tc_storage` 对象）、direct TGID 自旁路（`self_bypass_tgid`）、生命周期拆分。6 处冲突 |
 
-这一跳上游仍在 self-bypass 上收尾，但都没碰到我们的改动点：`bypass_process` 的
-LPM 表、marker-only 钩子、`delivery`/`tcx_*` 全部原样套用。需要注意的是 sing-box 侧
-`selfBypassUsesUserspaceRegistration()` 现在把 `SelfBypassCgroupSocketAddr` 也算作
-"需要用户态注册"——这是上游自己的判断，我们的 `RegisterSocket`/`UnregisterSocket` 调用点
-不需要跟着改。
+**这轮最实质的变化：上游自己实现了「自身早退」。** 我们原来在 `sb_ebpf_cgroup_control`
+里加的 `owner_tgid`（+ Go 侧 `ownerTGID`、`is_owner_process()`）和上游新增的
+`self_bypass_tgid`（+ `SB_EBPF_DIRECT_TGID` 变体）是同一个东西、同一个 ABI 槽位。
+已把我们的整套删掉，改用上游的：控制块仍是 36 字节，`bypass_process` 的 pname 判定
+接在 `is_direct_self_bypassed(config)` 之后。模块补丁因此从 1852 行降到 1783 行、25 → 24 个文件
+（`cgroup_maps_test.go` 已经和上游一致，不再出现在补丁里）。
+
+其余冲突都是同一形状的「两边各加字段」：`CgroupConfig`（上游 `selfBypassTGID` + 我们的
+`BypassProcess`/`MarkerOnly`）、`TCBackend`（上游 `selfStorage*` + 我们的 `delivery`/`tcx_*`）、
+`cgroup.bpf.c` 的 `get_current_comm` 声明与 pname 判定、`native/abi.h` 的 TGID 字段。
 
 更早的几跳：`91bc15bf`（17 个 commit，self-bypass 先试 socket-mark 又回退、UDP generation
-隔离、策略合并、diagnostics schema）需要手工合并模块 `CgroupConfig` 一处；`ed2bdc8`
-把 eBPF inbound 拆成三个内嵌结构体，补丁按新结构重做；`d3217e2` 只改 `go.mod` / `go.sum`。
+隔离、策略合并、diagnostics schema）；`ed2bdc8` 把 eBPF inbound 拆成三个内嵌结构体，
+补丁按新结构重做；`d3217e2` 只改 `go.mod` / `go.sum`。
 
 | 上游改动 | 补丁的应对 |
 | --- | --- |
@@ -39,7 +44,8 @@ LPM 表、marker-only 钩子、`delivery`/`tcx_*` 全部原样套用。需要注
 | 数据面启动拆成 `startCgroupDataPlane` / `startTCDataPlane` / `startSharedRewriteDataPlane` / `startTCListenersIfNeeded` | `delivery` / `tcx_*` 改为在 `startTCDataPlane` 里写进 `TCConfig`；marker-only 钩子挂在 cgroup 数据面之后的分支上 |
 | 监听器移到 `common/listener`，socket 注册改为 bind 成功之后 | 无需改动，属于上游自己的修复 |
 | `lifecycleAccess` 互斥量 + `logStartupSummaryLocked` / `runtimeSnapshotLocked` | 启动日志的三个字段（`delivery` / `delivery_used` / `bypass_process`）跟着搬进新函数 |
-| `CgroupConfig` 新增 `selfBypass *SelfBypass` | 与我们的 `BypassProcess` / `MarkerOnly` 落在同一字段块，两边都保留 |
+| `CgroupConfig` 新增 `selfBypass *SelfBypass` / `selfBypassTGID` | 与我们的 `BypassProcess` / `MarkerOnly` 落在同一字段块，两边都保留 |
+| 上游 `self_bypass_tgid` + `is_direct_self_bypassed()` 取代我们的 `owner_tgid` + `is_owner_process()` | 删掉我们那套，pname 判定接在上游早退之后 |
 
 `assemble-source` 里加了 **Verify patch anchors** 一步：补丁是行级 diff，上游再把函数挪走时
 照样能"应用成功"，所以逐个断言关键改动还在真正生效的代码上（尤其是缝在
@@ -47,9 +53,9 @@ LPM 表、marker-only 钩子、`delivery`/`tcx_*` 全部原样套用。需要注
 
 `SelfBypass.RegisterSocket` / `UnregisterSocket` / `FallbackReason` / `RemoveAssignmentIfMatch` /
 `LastRepair` / `DeliveryKind` 和按次统计的 UDP admission 计数（token / peer / recovery）在
-`bec0ab94` 里都还在，补丁不需要额外接口。
+`d2983dce` 里都还在，补丁不需要额外接口。
 
-组装结果已实测编译通过：`949d0cea` + 两份补丁 + `go mod replace ../module`，
+组装结果已实测编译通过：`6dc5542f` + 两份补丁 + `go mod replace ../module`，
 `-tags with_ebpf,with_clash_api,with_quic,with_utls,with_gvisor,with_wireguard,badlinkname`；
 `sing-box check` 用带 `bypass_process` / `netkit-l3` / `socket_assign` 的配置跑通，
 非法 `delivery` 与非法 `tcx_position` 仍然被拒。
@@ -243,7 +249,7 @@ L3 省下来的只有 MAC/ARP/邻居表；而交付路径里 MAC 是 eBPF 写进
 
 `cgroup/connect4|6`、`cgroup/sendmsg4|6` 运行在**发起系统调用的那个线程的上下文**里，所以 `bpf_get_current_comm()` 返回的就是发起连接的进程名（内核 `task->comm`，可执行文件 basename，截断 15 字节），不需要扫 `/proc`，也没有 pid→名字映射表的竞态。
 
-判定插在 `handle_v4/6` 最前段（owner 早退之后、**所有选择器之前**，包括 DNS 劫持）。
+判定插在 `handle_v4/6` 最前段（自身早退之后、**所有选择器之前**，包括 DNS 劫持）。
 
 ```json
 {
@@ -263,7 +269,14 @@ L3 省下来的只有 MAC/ARP/邻居表；而交付路径里 MAC 是 eBPF 写进
 
 实现：新增 LPM 表 `cgroup_process_bypass`（内核名 `sb_cg_pname`，256 条），`handle_v4/6` 多一次 comm 拷贝 + 一次查表；控制位 `SB_EBPF_CGROUP_FLAG_PROCESS_BYPASS (1U << 19U)` 未置位时这段完全不执行，零开销。
 
-另有一道**自身早退**：控制块新增 `owner_tgid`（结构体 32 → 36 字节），`handle_v4/6` 第一行比较 `bpf_get_current_pid_tgid() >> 32 == owner_tgid`，相等就直接 `return 1`。这是给 sing-box 自己的 dialer 用的——它的连接永远不该被改写回自己的监听。相比原来的 socket 元数据表（cgroup `sock_create` 打标）它不依赖任何 cgroup 子钩子，也不依赖用户态注册；`owner_tgid = 0`（进程不在初始 PID namespace）时自动关闭，退回元数据表。
+自身早退用的是**上游的实现**：控制块里的 `self_bypass_tgid`（32 → 36 字节），
+`handle_v4/6` 第一行 `is_direct_self_bypassed(config)` 比较
+`bpf_get_current_pid_tgid() >> 32 == self_bypass_tgid`，相等就直接 `return 1`——
+sing-box 自己 dialer 的连接永远不该被改写回自己的监听。`self_bypass_tgid = 0`
+（进程不在初始 PID namespace）时自动关闭，退回 socket 元数据表。
+
+> 早期我们自己在同一个 ABI 槽位加过 `owner_tgid` / `is_owner_process()`，2026-11-11
+> 上游把同一机制做进了模块（`SB_EBPF_DIRECT_TGID` 变体），我们的重复实现已删除。
 
 **这一节改动了 C 与 map，`internal/bpfgen/*.o` 必须重生成**——`assemble-source` 工作流里的
 `make generate`（NDK r29 / Clang 21）会做这件事，补丁里不带二进制。

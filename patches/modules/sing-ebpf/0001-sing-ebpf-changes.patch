@@ -60,10 +60,10 @@ index 0000000..0ef39f6
 +          if-no-files-found: error
 +          retention-days: 7
 diff --git a/api.go b/api.go
-index a700ab5..d43e112 100644
+index d01ad47..9b50f3b 100644
 --- a/api.go
 +++ b/api.go
-@@ -143,6 +143,14 @@ type SelfBypass struct {
+@@ -147,6 +147,14 @@ type SelfBypass struct {
  	core.SelfBypassHandle
  }
  
@@ -78,7 +78,7 @@ index a700ab5..d43e112 100644
  func NewSelfBypass() (*SelfBypass, error) {
  	backend, err := core.NewSelfBypass()
  	if err != nil {
-@@ -245,22 +253,72 @@ type CgroupConfig struct {
+@@ -259,22 +267,72 @@ type CgroupConfig struct {
  	UDPTimeout   time.Duration
  	Policy       CompiledPolicy
  	SelfBypass   *SelfBypass
@@ -160,7 +160,7 @@ index a700ab5..d43e112 100644
  type ProcessTrackerConfig struct {
  	EnableTCP    bool
  	EnableUDP    bool
-@@ -282,15 +340,21 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error)
+@@ -296,15 +354,21 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error)
  
  type TCConfig struct {
  	// TCP and UDP preserve their tuples in a required private listener namespace.
@@ -191,7 +191,7 @@ index a700ab5..d43e112 100644
  	Policy             CompiledPolicy
  	RoutingMark        uint32
  	SelfBypass         *SelfBypass
-@@ -315,6 +379,9 @@ func PrepareTC(config TCConfig) (*TCBackend, error) {
+@@ -329,6 +393,9 @@ func PrepareTC(config TCConfig) (*TCBackend, error) {
  		EnableTCP:          config.EnableTCP,
  		EnableUDP:          config.EnableUDP,
  		DeliveryInterface:  config.DeliveryInterface,
@@ -202,10 +202,10 @@ index a700ab5..d43e112 100644
  		RoutingMark:        config.RoutingMark,
  		TrackProcess:       config.TrackProcess,
 diff --git a/internal/core/access.go b/internal/core/access.go
-index 69ce309..5743f7f 100644
+index ffd442d..91d9795 100644
 --- a/internal/core/access.go
 +++ b/internal/core/access.go
-@@ -74,6 +74,30 @@ func NewTCBackendHandle(backend *TCBackend) TCBackendHandle {
+@@ -85,6 +85,30 @@ func NewTCBackendHandle(backend *TCBackend) TCBackendHandle {
  	return TCBackendHandle{backend: backend}
  }
  
@@ -237,7 +237,7 @@ index 69ce309..5743f7f 100644
  	return h.backend
  }
 diff --git a/internal/core/cgroup_abi.go b/internal/core/cgroup_abi.go
-index 0835a16..8375076 100644
+index 71a112e..a7cd094 100644
 --- a/internal/core/cgroup_abi.go
 +++ b/internal/core/cgroup_abi.go
 @@ -54,8 +54,16 @@ const (
@@ -257,21 +257,10 @@ index 0835a16..8375076 100644
  type cgroupControl struct {
  	Flags                uint32
  	NetworkGeneration    uint32
-@@ -65,6 +73,10 @@ type cgroupControl struct {
- 	ListenerPort         uint16
- 	Reserved             uint16
- 	RedirectIPv6Prefix   [8]byte
-+	// OwnerTGID is the thread-group id of this process. The hooks return early
-+	// for it so the dialer's own sockets are never redirected into our
-+	// listener; zero disables the check.
-+	OwnerTGID uint32
- }
- 
- type udpPeerKey struct {
-@@ -130,6 +142,14 @@ type CgroupConfig struct {
- 	Policy        CompiledPolicy
- 	SelfBypassMap *CiliumEBPF.Map
- 	selfBypass    *SelfBypass
+@@ -132,6 +140,14 @@ type CgroupConfig struct {
+ 	SelfBypassMap  *CiliumEBPF.Map
+ 	selfBypass     *SelfBypass
+ 	selfBypassTGID uint32
 +	// BypassProcess lists process-name prefixes that are never proxied. The
 +	// match runs in the connect/sendmsg hook, i.e. in the caller's context,
 +	// and is evaluated before every other selector including DNS handling.
@@ -284,20 +273,19 @@ index 0835a16..8375076 100644
  
  func DefaultCgroupMapCapacity() CgroupMapCapacity {
 diff --git a/internal/core/cgroup_backend.go b/internal/core/cgroup_backend.go
-index a9a685c..6d73a37 100644
+index 2726f3f..c80b970 100644
 --- a/internal/core/cgroup_backend.go
 +++ b/internal/core/cgroup_backend.go
-@@ -107,6 +107,9 @@ type cgroupRuntime struct {
+@@ -108,6 +108,8 @@ type cgroupRuntime struct {
  }
  
  type CgroupBackend struct {
 +	bypassProcess          []string
-+	ownerTGID              uint32
 +	markerOnly             bool
  	access                 sync.RWMutex
  	health                 backendHealth
  	recovery               cgroupRecoveryStore
-@@ -169,14 +172,16 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -171,14 +173,16 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  			return nil, err
  		}
  	}
@@ -322,7 +310,7 @@ index a9a685c..6d73a37 100644
  	}
  	udpTimeoutSeconds := uint32(0)
  	if config.EnableUDP {
-@@ -239,12 +244,17 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -241,12 +245,17 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  	socketReleaseSupported := false
  	skStorage := false
  	coarseTimeSupported := false
@@ -343,7 +331,7 @@ index a9a685c..6d73a37 100644
  		}
  	}
  	if socketReleaseSupported &&
-@@ -291,6 +301,14 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -293,6 +302,11 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  		}
  		return nil, err
  	}
@@ -352,22 +340,18 @@ index a9a685c..6d73a37 100644
 +		closeCgroup()
 +		return nil, err
 +	}
-+	// Outside the initial PID namespace the kernel reports a different tgid, so
-+	// the check stays disabled (0) and the metadata map keeps covering us.
-+	ownerTGID, _ := selfBypassOwnerTGID()
  	backend := &CgroupBackend{
  		mapCapacity:         mapCapacity,
  		runtime:             runtimeState,
-@@ -314,6 +332,9 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
- 		selfBypass:          config.selfBypass,
+@@ -317,6 +331,8 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+ 		selfBypassTGID:      config.selfBypassTGID,
  		bypassIPv4CIDR:      slices.Clone(policy.localInitialBypass.ipv4),
  		bypassIPv6CIDR:      slices.Clone(policy.localInitialBypass.ipv6),
 +		bypassProcess:       slices.Clone(config.BypassProcess),
-+		ownerTGID:           ownerTGID,
 +		markerOnly:          config.MarkerOnly,
  	}
+ 	runtimeState.direct_tgid = config.selfBypassTGID != 0
  	if err = populateCompiledPolicyMaps(policyMapTargets{
- 		LocalForceIPv4:  runtimeState.maps["cgroup_force4"],
 diff --git a/internal/core/cgroup_maps.go b/internal/core/cgroup_maps.go
 index 752ce61..2089648 100644
 --- a/internal/core/cgroup_maps.go
@@ -380,29 +364,8 @@ index 752ce61..2089648 100644
  		"cgroup_host_ipv4":         {name: "sb_cg_host4", mapType: CiliumEBPF.Hash, maxEntries: maxHostAddressPolicyEntries, flags: bpfFlagNoPrealloc},
  		"cgroup_host_ipv6":         {name: "sb_cg_host6", mapType: CiliumEBPF.Hash, maxEntries: maxHostAddressPolicyEntries, flags: bpfFlagNoPrealloc},
  		"cgroup_udp_release_watch": {
-diff --git a/internal/core/cgroup_maps_test.go b/internal/core/cgroup_maps_test.go
-index f5e588e..8776cb2 100644
---- a/internal/core/cgroup_maps_test.go
-+++ b/internal/core/cgroup_maps_test.go
-@@ -19,12 +19,15 @@ func TestCgroupSocketPeerStorageMapABI(t *testing.T) {
- }
- 
- func TestCgroupNetworkGenerationABI(t *testing.T) {
--	if size := unsafe.Sizeof(cgroupControl{}); size != 32 {
-+	if size := unsafe.Sizeof(cgroupControl{}); size != 36 {
- 		t.Fatalf("unexpected cgroup control size: %d", size)
- 	}
- 	if offset := unsafe.Offsetof(cgroupControl{}.NetworkGeneration); offset != 4 {
- 		t.Fatalf("unexpected cgroup network generation offset: %d", offset)
- 	}
-+	if offset := unsafe.Offsetof(cgroupControl{}.OwnerTGID); offset != 32 {
-+		t.Fatalf("unexpected cgroup owner tgid offset: %d", offset)
-+	}
- 	if size := unsafe.Sizeof(udpFlowValue{}); size != 32 {
- 		t.Fatalf("unexpected cgroup UDP flow value size: %d", size)
- 	}
 diff --git a/internal/core/cgroup_program.go b/internal/core/cgroup_program.go
-index 930cd57..85713b2 100644
+index f9f320a..1ad9566 100644
 --- a/internal/core/cgroup_program.go
 +++ b/internal/core/cgroup_program.go
 @@ -30,7 +30,9 @@ func (b *CgroupBackend) loadPrograms(listenerPort uint16) error {
@@ -416,7 +379,7 @@ index 930cd57..85713b2 100644
  		return E.New("missing eBPF redirect listener port")
  	}
  	b.listenerPort = listenerPort
-@@ -131,7 +133,8 @@ func coarseTimeUnavailable(err error) bool {
+@@ -158,7 +160,8 @@ func coarseTimeUnavailable(err error) bool {
  }
  
  func (b *CgroupBackend) validateCgroupProgramSet(programs []*CiliumEBPF.Program) error {
@@ -426,7 +389,7 @@ index 930cd57..85713b2 100644
  		return nil
  	}
  	if len(programs) <= cgroupProgramSocketRelease {
-@@ -148,6 +151,17 @@ func (b *CgroupBackend) validateCgroupProgramSet(programs []*CiliumEBPF.Program)
+@@ -175,6 +178,17 @@ func (b *CgroupBackend) validateCgroupProgramSet(programs []*CiliumEBPF.Program)
  }
  
  func (b *CgroupBackend) cgroupProgramEnabled(slot int) bool {
@@ -444,7 +407,7 @@ index 930cd57..85713b2 100644
  	enableIPv4 := b.redirectIPv4.IsValid()
  	enableIPv6 := b.enableIPv6
  	switch slot {
-@@ -235,6 +249,17 @@ func (b *CgroupBackend) updateCgroupControl(listenerPort uint16) error {
+@@ -262,6 +276,17 @@ func (b *CgroupBackend) updateCgroupControl(listenerPort uint16) error {
  	if b.runtime.udp_release_observer {
  		flags |= cgroupFlagUDPReleaseNotify
  	}
@@ -462,14 +425,6 @@ index 930cd57..85713b2 100644
  	ipv4Prefix, ipv4HostMask := cgroupIPv4Redirect(b.redirectIPv4)
  	control := cgroupControl{
  		Flags:                flags,
-@@ -243,6 +268,7 @@ func (b *CgroupBackend) updateCgroupControl(listenerPort uint16) error {
- 		RedirectIPv4Prefix:   ipv4Prefix,
- 		RedirectIPv4HostMask: ipv4HostMask,
- 		ListenerPort:         listenerPort,
-+		OwnerTGID:            b.ownerTGID,
- 	}
- 	if b.redirectIPv6.IsValid() {
- 		address := b.redirectIPv6.Addr().As16()
 diff --git a/internal/core/diagnostics.go b/internal/core/diagnostics.go
 index 8c4079d..3303cbc 100644
 --- a/internal/core/diagnostics.go
@@ -704,7 +659,7 @@ index 0000000..80d573b
 +	return key, nil
 +}
 diff --git a/internal/core/tc.go b/internal/core/tc.go
-index 473e4de..194ffb5 100644
+index 1fadbef..711573a 100644
 --- a/internal/core/tc.go
 +++ b/internal/core/tc.go
 @@ -95,15 +95,22 @@ const (
@@ -739,17 +694,17 @@ index 473e4de..194ffb5 100644
  	Policy             CompiledPolicy
  	RoutingMark        uint32
  	SelfBypassMap      *CiliumEBPF.Map
-@@ -171,6 +178,9 @@ type TCBackend struct {
- 	tcpListenerMap   bool
- 	programsExposed  bool
- 	control          tcControl
-+	delivery         string
-+	tcxPosition      string
-+	tcxPriority      uint16
- 	controlMapFD     int
- 	flowStore        tcFlowStore
- 	selfMapExternal  bool
-@@ -309,6 +319,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
+@@ -175,6 +182,9 @@ type TCBackend struct {
+ 	tcpListenerMap      bool
+ 	programsExposed     bool
+ 	control             tcControl
++	delivery            string
++	tcxPosition         string
++	tcxPriority         uint16
+ 	controlMapFD        int
+ 	flowStore           tcFlowStore
+ 	selfMapExternal     bool
+@@ -334,6 +344,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
  		controlValue.Flags |= tcFlagSharedBypassIPv6
  	}
  	backend := &TCBackend{
@@ -759,7 +714,7 @@ index 473e4de..194ffb5 100644
  		runtime:        &tcRuntime{maps: maps, programs: loadedPrograms},
  		tcpListenerMap: config.EnableTCP && !legacyTCP,
  		control:        controlValue,
-@@ -971,6 +984,14 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
+@@ -1032,6 +1045,14 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
  func (b *TCBackend) DeliveryIngressProgramFD() int { return b.programFD(tcProgramDeliveryIngress) }
  func (b *TCBackend) IsolatedReturnProgramFD() int  { return b.programFD(tcProgramIsolatedReturn) }
  
@@ -853,7 +808,7 @@ index 86c87a4..9992805 100644
  	for _, attached := range programs {
  		other, marked, err := tcxProgramOrder(attached.ID)
 diff --git a/native/abi.h b/native/abi.h
-index 91b1887..dd18932 100644
+index 503dc7b..cb86aa3 100644
 --- a/native/abi.h
 +++ b/native/abi.h
 @@ -33,6 +33,7 @@
@@ -864,21 +819,7 @@ index 91b1887..dd18932 100644
  struct sb_ebpf_cgroup_control {
      __u32 flags;
      __u32 network_generation;
-@@ -42,9 +43,12 @@ struct sb_ebpf_cgroup_control {
-     __u16 listener_port;
-     __u16 reserved_policy;
-     __u8 redirect_ipv6_prefix[8];
-+    // owner_tgid is the thread-group id of the process running the data plane.
-+    // Zero disables the check (e.g. outside the initial PID namespace).
-+    __u32 owner_tgid;
- };
- 
--_Static_assert(sizeof(struct sb_ebpf_cgroup_control) == 32U, "unexpected cgroup control ABI");
-+_Static_assert(sizeof(struct sb_ebpf_cgroup_control) == 36U, "unexpected cgroup control ABI");
- _Static_assert(__builtin_offsetof(struct sb_ebpf_cgroup_control, network_generation) == 4U,
-     "unexpected cgroup network generation ABI");
- 
-@@ -144,4 +148,13 @@ struct sb_ebpf_ipv6_cidr_lpm_key {
+@@ -147,4 +148,13 @@ struct sb_ebpf_ipv6_cidr_lpm_key {
      __u8 addr[16];
  };
  
@@ -893,7 +834,7 @@ index 91b1887..dd18932 100644
 +
  #endif
 diff --git a/native/cgroup.bpf.c b/native/cgroup.bpf.c
-index aaaf88f..ffcbe86 100644
+index ceec1c4..4a5afd3 100644
 --- a/native/cgroup.bpf.c
 +++ b/native/cgroup.bpf.c
 @@ -80,6 +80,7 @@ MAP(cgroup_uid_policy, struct sb_ebpf_uid_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE);
@@ -904,19 +845,18 @@ index aaaf88f..ffcbe86 100644
  MAP(cgroup_host_ipv4, struct sb_ebpf_ipv4_cidr_lpm_key, __u8, BPF_MAP_TYPE_HASH);
  MAP(cgroup_host_ipv6, struct sb_ebpf_ipv6_cidr_lpm_key, __u8, BPF_MAP_TYPE_HASH);
  MAP(cgroup_udp_release_watch, __u64, __u8, BPF_MAP_TYPE_HASH);
-@@ -98,6 +99,8 @@ static void *(*sk_storage_get)(void *map, void *sk, void *value, __u64 flags) =
-     (void *)BPF_FUNC_sk_storage_get;
+@@ -101,6 +102,7 @@ static __u64 (*get_current_uid_gid)(void) = (void *)BPF_FUNC_get_current_uid_gid
+ #ifdef SB_EBPF_DIRECT_TGID
+ static __u64 (*get_current_pid_tgid)(void) = (void *)BPF_FUNC_get_current_pid_tgid;
  #endif
- static __u64 (*get_current_uid_gid)(void) = (void *)BPF_FUNC_get_current_uid_gid;
-+static __u64 (*get_current_pid_tgid)(void) = (void *)BPF_FUNC_get_current_pid_tgid;
 +static long (*get_current_comm)(void *buf, __u32 size) = (void *)BPF_FUNC_get_current_comm;
  static __u64 (*ktime_get_ns)(void) = (void *)BPF_FUNC_ktime_get_ns;
  static long (*ringbuf_output)(void *ringbuf, void *data, __u64 size, __u64 flags) =
      (void *)BPF_FUNC_ringbuf_output;
-@@ -160,6 +163,34 @@ INLINE bool is_cookie_bypassed(__u64 cookie) {
-         (*metadata & SB_EBPF_SOCKET_METADATA_SELF_BYPASS) != 0U;
- }
- 
+@@ -171,6 +173,27 @@ INLINE bool is_direct_self_bypassed(const struct sb_ebpf_cgroup_control *config)
+     (void)config;
+     return false;
+ #endif
 +// The decision is taken in the caller's context: cgroup connect/sendmsg hooks
 +// run as the task that issued the syscall, so bpf_get_current_comm names the
 +// program that owns the connection. Matched processes are never proxied.
@@ -938,21 +878,13 @@ index aaaf88f..ffcbe86 100644
 +    map_update(&cgroup_socket_bypass, &cookie, &metadata, 0U);
 +}
 +
-+// Never intercept the process that runs the data plane: its own dialer sockets
-+// would otherwise be redirected straight back into its own listener.
-+INLINE bool is_owner_process(const struct sb_ebpf_cgroup_control *config) {
-+    if (config->owner_tgid == 0U) return false;
-+    return (__u32)(get_current_pid_tgid() >> 32) == config->owner_tgid;
-+}
-+
+ }
+ 
  INLINE bool uid_bypassed(const struct sb_ebpf_cgroup_control *config) {
-     if ((config->flags & SB_EBPF_CGROUP_FLAG_UID_POLICY) == 0U) return false;
-     __u32 uid = network_order32((__u32)get_current_uid_gid());
-@@ -696,6 +727,14 @@ INLINE int handle_v4(
-     enum cgroup_protocol_mode protocol_mode) {
+@@ -710,6 +733,13 @@ INLINE int handle_v4(
      const struct sb_ebpf_cgroup_control *config = control();
      if (config == 0) return 1;
-+    if (is_owner_process(config)) return 1;
+     if (is_direct_self_bypassed(config)) return 1;
 +    // Excluded programs are decided here, before every other selector: no
 +    // destination rewrite, no DNS handling, and the socket is flagged so the
 +    // TC data plane skips it as well.
@@ -963,11 +895,10 @@ index aaaf88f..ffcbe86 100644
      __u8 protocol;
      if (protocol_mode == CGROUP_PROTOCOL_TCP_ONLY) {
          if (!connect_hook || ctx->protocol != TCP_VALUE) return 1;
-@@ -781,6 +820,13 @@ INLINE int handle_v6(
-     enum cgroup_protocol_mode protocol_mode) {
+@@ -796,6 +826,12 @@ INLINE int handle_v6(
      const struct sb_ebpf_cgroup_control *config = control();
      if (config == 0) return 1;
-+    if (is_owner_process(config)) return 1;
+     if (is_direct_self_bypassed(config)) return 1;
 +    // See handle_v4: the decision must precede every selector and travel to TC
 +    // as socket metadata.
 +    if ((config->flags & SB_EBPF_CGROUP_FLAG_PROCESS_BYPASS) != 0U && process_bypassed()) {
@@ -977,7 +908,7 @@ index aaaf88f..ffcbe86 100644
      __u32 address[4];
      __builtin_memcpy(address, ctx->user_ip6, sizeof(address));
      __u8 protocol;
-@@ -1151,4 +1197,21 @@ INLINE int release_socket_notify(struct bpf_sock *ctx) {
+@@ -1166,4 +1202,21 @@ INLINE int release_socket_notify(struct bpf_sock *ctx) {
  SEC("cgroup/sock_release_cookie") int sb_ebpf_rel_cookie(struct bpf_sock *ctx) { return release_socket(ctx); }
  SEC("cgroup/sock_release_notify") int sb_ebpf_rel_notify(struct bpf_sock *ctx) { return release_socket_notify(ctx); }
  

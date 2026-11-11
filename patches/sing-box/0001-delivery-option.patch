@@ -1,15 +1,15 @@
 diff --git a/adapter/ebpf.go b/adapter/ebpf.go
-index 68923a99..18aa7e83 100644
+index 7029ef38..5a2582cb 100644
 --- a/adapter/ebpf.go
 +++ b/adapter/ebpf.go
-@@ -81,6 +81,7 @@ type EBPFRuntimeDiagnostics struct {
- 	TCBackendMode                 string
- 	TCListenerLookupMode          string
- 	TCAttachmentMode              string
-+	TCDeliveryKind                string
- 	TCDeliveryInterface           string
- 	TCNetworkNamespace            string
- 	TCDeliveryInterfaceIndex      int
+@@ -91,6 +91,7 @@ type EBPFRuntimeDiagnostics struct {
+ 	TCBackendMode                   string
+ 	TCListenerLookupMode            string
+ 	TCAttachmentMode                string
++	TCDeliveryKind                  string
+ 	TCDeliveryInterface             string
+ 	TCNetworkNamespace              string
+ 	TCDeliveryInterfaceIndex        int
 diff --git a/box.go b/box.go
 index 143f1eab..1a29767f 100644
 --- a/box.go
@@ -227,29 +227,29 @@ index bf144ad4..48a55ebc 100644
  
  type CacheFileOptions struct {
 diff --git a/protocol/ebpf/diagnostics_api.go b/protocol/ebpf/diagnostics_api.go
-index 04d6dabc..1f1c3cc6 100644
+index 5c5f099f..19657751 100644
 --- a/protocol/ebpf/diagnostics_api.go
 +++ b/protocol/ebpf/diagnostics_api.go
-@@ -70,6 +70,7 @@ func diagnosticsForAPI(diagnostics EBPFDiagnostics) adapter.EBPFRuntimeDiagnosti
- 		TCDeliveryInterface:           diagnostics.TCDeliveryInterface,
- 		TCNetworkNamespace:            diagnostics.TCNetworkNamespace,
- 		TCDeliveryInterfaceIndex:      diagnostics.TCDeliveryInterfaceIndex,
-+		TCDeliveryKind:                diagnostics.TCDeliveryKind,
- 		TCRoutingMark:                 diagnostics.TCRoutingMark,
- 		TCRoutingTable:                diagnostics.TCRoutingTable,
- 		TCRoutingPriority:             diagnostics.TCRoutingPriority,
+@@ -76,6 +76,7 @@ func diagnosticsForAPI(diagnostics EBPFDiagnostics) adapter.EBPFRuntimeDiagnosti
+ 		TCBackendMode:                   diagnostics.TCBackendMode,
+ 		TCListenerLookupMode:            diagnostics.TCListenerLookupMode,
+ 		TCAttachmentMode:                diagnostics.TCAttachmentMode,
++		TCDeliveryKind:                  diagnostics.TCDeliveryKind,
+ 		TCDeliveryInterface:             diagnostics.TCDeliveryInterface,
+ 		TCNetworkNamespace:              diagnostics.TCNetworkNamespace,
+ 		TCDeliveryInterfaceIndex:        diagnostics.TCDeliveryInterfaceIndex,
 diff --git a/protocol/ebpf/diagnostics_model.go b/protocol/ebpf/diagnostics_model.go
-index 6e686af4..15c1b600 100644
+index 52304db4..cedeb7e5 100644
 --- a/protocol/ebpf/diagnostics_model.go
 +++ b/protocol/ebpf/diagnostics_model.go
-@@ -151,6 +151,7 @@ type EBPFDiagnostics struct {
- 	TCDeliveryInterface           string     `json:"tc_delivery_interface,omitempty"`
- 	TCNetworkNamespace            string     `json:"tc_network_namespace,omitempty"`
- 	TCDeliveryInterfaceIndex      int        `json:"tc_delivery_interface_index,omitempty"`
-+	TCDeliveryKind                string     `json:"tc_delivery_kind,omitempty"`
- 	TCRoutingMark                 uint32     `json:"tc_routing_mark,omitempty"`
- 	TCRoutingTable                int        `json:"tc_routing_table,omitempty"`
- 	TCRoutingPriority             int        `json:"tc_routing_priority,omitempty"`
+@@ -158,6 +158,7 @@ type EBPFDiagnostics struct {
+ 	TCBackendMode                   string     `json:"tc_backend_mode,omitempty"`
+ 	TCListenerLookupMode            string     `json:"tc_listener_lookup_mode,omitempty"`
+ 	TCAttachmentMode                string     `json:"tc_attachment_mode,omitempty"`
++	TCDeliveryKind                  string     `json:"tc_delivery_kind,omitempty"`
+ 	TCDeliveryInterface             string     `json:"tc_delivery_interface,omitempty"`
+ 	TCNetworkNamespace              string     `json:"tc_network_namespace,omitempty"`
+ 	TCDeliveryInterfaceIndex        int        `json:"tc_delivery_interface_index,omitempty"`
 diff --git a/protocol/ebpf/diagnostics_render.go b/protocol/ebpf/diagnostics_render.go
 index 19aaf4b7..911a3d4b 100644
 --- a/protocol/ebpf/diagnostics_render.go
@@ -274,10 +274,10 @@ index 19aaf4b7..911a3d4b 100644
  	}))
  }
 diff --git a/protocol/ebpf/diagnostics_snapshot.go b/protocol/ebpf/diagnostics_snapshot.go
-index a678e7da..1ccf04a1 100644
+index 432d65d7..94f72e34 100644
 --- a/protocol/ebpf/diagnostics_snapshot.go
 +++ b/protocol/ebpf/diagnostics_snapshot.go
-@@ -97,6 +97,7 @@ func (i *Inbound) diagnosticsLocked() EBPFDiagnostics {
+@@ -111,6 +111,7 @@ func (i *Inbound) diagnosticsLocked() EBPFDiagnostics {
  		diagnostics.TCDeliveryInterface = tc.NetworkInfo.DeliveryInterface
  		diagnostics.TCNetworkNamespace = tc.NetworkInfo.Namespace
  		diagnostics.TCDeliveryInterfaceIndex = tc.NetworkInfo.DeliveryInterfaceIndex
@@ -420,7 +420,7 @@ index 55e1e323..f577d904 100644
 +	return priority, position, nil
 +}
 diff --git a/protocol/ebpf/inbound_connection.go b/protocol/ebpf/inbound_connection.go
-index f4bb5f4b..7b3a9acd 100644
+index 5f370758..daa3e693 100644
 --- a/protocol/ebpf/inbound_connection.go
 +++ b/protocol/ebpf/inbound_connection.go
 @@ -8,6 +8,7 @@ import (
@@ -431,7 +431,7 @@ index f4bb5f4b..7b3a9acd 100644
  	"strings"
  	"syscall"
  
-@@ -80,6 +81,13 @@ func (i *Inbound) NewConnection(
+@@ -85,6 +86,13 @@ func (i *Inbound) NewConnection(
  		metadata.Source = M.SocksaddrFromNet(conn.RemoteAddr())
  		metadata.Destination = M.SocksaddrFromNetIP(original.Destination)
  		metadata.ProcessInfo = i.lookupProcessInfo(original.SocketCookie)
@@ -505,7 +505,7 @@ index 7f06bc5d..0eb8cf2e 100644
  	if err != nil {
  		return err
 diff --git a/protocol/ebpf/lifecycle_start.go b/protocol/ebpf/lifecycle_start.go
-index aaf467a4..f4e8a550 100644
+index 1ab3c615..f976fad3 100644
 --- a/protocol/ebpf/lifecycle_start.go
 +++ b/protocol/ebpf/lifecycle_start.go
 @@ -113,6 +113,13 @@ func (i *Inbound) startInbound() error {
@@ -522,7 +522,7 @@ index aaf467a4..f4e8a550 100644
  	}
  	if backend != nil {
  		if err = backend.Enable(); err != nil {
-@@ -254,6 +261,9 @@ func (i *Inbound) startTCDataPlane(
+@@ -261,6 +268,9 @@ func (i *Inbound) startTCDataPlane(
  ) (*commonEBPF.TCBackend, tcRuntime, error) {
  	backendConfig := commonEBPF.TCConfig{
  		ListenerPort:      i.tcListeners.selectedPort(),
@@ -532,7 +532,7 @@ index aaf467a4..f4e8a550 100644
  		EnableLocal:       localEnabled,
  		EnableShared:      sharedEnabled,
  		EnableIPv4:        true,
-@@ -527,3 +537,25 @@ func combineStartError(startErr error, cleanupErr error) error {
+@@ -543,3 +553,25 @@ func combineStartError(startErr error, cleanupErr error) error {
  	}
  	return E.Errors(startErr, E.Cause(cleanupErr, "cleanup eBPF inbound"))
  }
@@ -559,7 +559,7 @@ index aaf467a4..f4e8a550 100644
 +	return err
 +}
 diff --git a/protocol/ebpf/tc_connection.go b/protocol/ebpf/tc_connection.go
-index 212f468c..6b5a3a09 100644
+index abbf9167..5f150459 100644
 --- a/protocol/ebpf/tc_connection.go
 +++ b/protocol/ebpf/tc_connection.go
 @@ -8,6 +8,7 @@ import (
