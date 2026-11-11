@@ -1,0 +1,64 @@
+name: Build TCP offload probe
+
+# 手动触发，构建 P0 探针（只验证 sockmap egress redirect 是否可用）。
+# 产物是 linux/amd64 与 linux/arm64 的静态二进制，不参与 sing-box 打包。
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: offload-probe
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: probe/go.mod
+          cache-dependency-path: probe/go.sum
+
+      - name: Test object layout
+        run: |
+          set -euxo pipefail
+          cd probe
+          go vet ./...
+          go test ./...
+
+      - name: Build probe
+        run: |
+          set -euxo pipefail
+          cd probe
+          for arch in amd64 arm64; do
+            GOOS=linux GOARCH="$arch" CGO_ENABLED=0 \
+              go build -trimpath -ldflags "-s -w" -o "tcp-offload-probe-linux-$arch" .
+          done
+          ls -l tcp-offload-probe-linux-*
+          sha256sum tcp-offload-probe-linux-*
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: tcp-offload-probe
+          path: probe/tcp-offload-probe-linux-*
+          retention-days: 30
+          compression-level: 0
+
+      - name: Summary
+        run: |
+          {
+            echo "## TCP offload probe"
+            echo
+            echo "下载 artifact 后放到路由器上以 root 运行："
+            echo
+            echo '```'
+            echo "./tcp-offload-probe-linux-arm64 -mode both -mb 64"
+            echo '```'
+            echo
+            echo "判定标准见 probe/README.md 的「测试要素」表。"
+          } >> "$GITHUB_STEP_SUMMARY"
