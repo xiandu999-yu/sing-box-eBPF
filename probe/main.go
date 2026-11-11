@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -310,7 +311,13 @@ func runScenario(e *env, chunkMB int) error {
 		useCookie = false
 		collection, err = loadSingle(spec, "probe_verdict_fixed")
 		if err != nil {
-			return fmt.Errorf("fixed 程序也加载失败: %w", err)
+			fmt.Printf("fixed 程序也加载失败: %v\n", err)
+			if _, noopErr := loadSingle(spec, "probe_verdict_noop"); noopErr != nil {
+				fmt.Printf("noop 程序同样加载失败: %v → 装载路径/程序类型本身有问题\n", noopErr)
+			} else {
+				fmt.Println("noop 程序可以装载 → 装载路径正常，失败在 helper 或具体指令")
+			}
+			return fmt.Errorf("fixed 程序加载失败")
 		}
 	}
 	defer collection.Close()
@@ -474,6 +481,8 @@ func loadSingle(spec *ebpf.CollectionSpec, name string) (*ebpf.Collection, error
 			delete(clone.Programs, other)
 		}
 	}
+	// sk_skb 程序必须带 expected_attach_type，否则 bpf_prog_load 直接返回 EINVAL。
+	clone.Programs[name].AttachType = ebpf.AttachSkSKBStreamVerdict
 	collection, err := ebpf.NewCollectionWithOptions(clone, ebpf.CollectionOptions{
 		Programs: ebpf.ProgramOptions{
 			LogLevel:     ebpf.LogLevelBranch | ebpf.LogLevelStats,
@@ -481,6 +490,10 @@ func loadSingle(spec *ebpf.CollectionSpec, name string) (*ebpf.Collection, error
 		},
 	})
 	if err != nil {
+		var verifierErr *ebpf.VerifierError
+		if errors.As(err, &verifierErr) && len(verifierErr.Log) > 0 {
+			fmt.Fprintf(os.Stderr, "verifier log (%s):\n%s\n", name, strings.Join(verifierErr.Log, "\n"))
+		}
 		return nil, err
 	}
 	return collection, nil

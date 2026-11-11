@@ -49,7 +49,7 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o tcp-offload-probe .
 
 | # | 要素 | 观测点 | 通过标准 | 不通过意味着 |
 | --- | --- | --- | --- | --- |
-| 1 | 对象与程序加载 | 运行时是否打印“cookie 程序加载失败” | 没有这行，且能 attach L/R | 内核不认 `sk_skb`/`SOCKHASH`，或 verifier 拒绝了 helper/裸 map lookup |
+| 1 | 对象与程序加载 | 运行时是否打印 `cookie 程序加载失败`；两者都失败时会再试 `probe_verdict_noop` | noop 能装载（说明装载路径正常），cookie/fixed 装载成功 | noop 也失败 = 装载路径/程序类型本身有问题；只有 cookie 失败 = `bpf_get_socket_cookie` 不被 sk_skb 允许 |
 | 2 | cookie key | `kernel counters: cookie_nonzero>0 lookup_hit>0` | 两个计数都非 0 | `bpf_get_socket_cookie` 在 `sk_skb` 不可用 → 只能退回 fixed-key，做不了双向 |
 | 3 | 同 netns egress redirect | `client→server: ok` / `server→client: ok` | 两条都 ok | redirect 机制本身不通（helper 语义/attach 类型问题） |
 | 4 | 跨 netns redirect | `cross-netns: PASS` | ping/pong 双向都通 | 生产拓扑（私有 netns ↔ 主 netns）不可用，整个方案到此为止 |
@@ -81,14 +81,18 @@ cross-netns: PASS（cookie=true）
 - `服务端收不到（redirect 没生效 / 方向不对）` → 要素 3 不过，检查 attach 类型是否为 `SK_SKB_STREAM_VERDICT`、map value 是否为对端 fd。
 - `cross-netns: FAIL` 但 same 通过 → 要素 4 不过，这就是我们拓扑的致命项，直接停。
 
-失败时会打印内核 verifier 日志（`LogLevelBranch|LogLevelStats`），
+失败时会打印内核 verifier 日志（`LogLevelBranch|LogLevelStats` + `VerifierError.Log` 全文），
 `unsatisfied map reference` 这类是用户态装载方式的问题，不是内核拒绝。
 
-> 2026-11-11 修过一次：最早直接 `ebpf.NewProgram(progSpec)` 单程序装载，
-> 程序里的 map 重定位没有被替换成 map fd，内核侧报
-> `instruction N: unsatisfied map reference`。现在改成“每个程序各自一个
-> 只含单个程序的 collection”，map 由 collection 统一创建并解析引用；
-> cookie 程序被 verifier 拒绝时，fixed 程序仍然能在自己的 collection 里单独装载。
+> 2026-11-11 修过两次：
+> 1. 最早直接 `ebpf.NewProgram(progSpec)` 单程序装载，程序里的 map 重定位没有被替换成
+>    map fd，内核侧报 `instruction N: unsatisfied map reference`。现在改成“每个程序各自
+>    一个只含单个程序的 collection”，map 由 collection 统一创建并解析引用。
+> 2. `sk_skb` 程序必须带 `expected_attach_type`，否则 `bpf_prog_load` 可能直接返回 `EINVAL`。
+>    现在对象里 section 改成 `sk_skb/stream_verdict`，Go 侧也显式设置
+>    `AttachType = AttachSkSKBStreamVerdict`；另外失败时会打印**完整** verifier 日志
+>    （`VerifierError.Log` 逐行），并用 `probe_verdict_noop` 区分“装载路径坏了”和
+>    “某个 helper 被拒”。
 
 ## 文件
 

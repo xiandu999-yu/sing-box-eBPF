@@ -30,13 +30,16 @@ func TestProbeObjectLayout(t *testing.T) {
 	if sockMap.ValueSize != 4 {
 		t.Fatalf("probe_sock value size = %d, want 4 (u32 fd)", sockMap.ValueSize)
 	}
-	for _, name := range []string{"probe_verdict_cookie", "probe_verdict_fixed"} {
+	for _, name := range []string{"probe_verdict_cookie", "probe_verdict_fixed", "probe_verdict_noop"} {
 		prog, ok := spec.Programs[name]
 		if !ok {
 			t.Fatalf("program %s missing", name)
 		}
 		if prog.Type != ebpf.SkSKB {
 			t.Fatalf("%s type = %v, want SkSKB", name, prog.Type)
+		}
+		if prog.AttachType != ebpf.AttachSkSKBStreamVerdict {
+			t.Fatalf("%s attach type = %v, want stream verdict", name, prog.AttachType)
 		}
 	}
 }

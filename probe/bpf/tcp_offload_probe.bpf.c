@@ -73,7 +73,7 @@ static __always_inline int redirect(struct __sk_buff *skb, struct probe_key *key
     return result;
 }
 
-SEC("sk_skb")
+SEC("sk_skb/stream_verdict")
 int probe_verdict_cookie(struct __sk_buff *skb) {
     struct probe_key key = {};
     key.cookie = get_socket_cookie(skb);
@@ -85,11 +85,17 @@ int probe_verdict_cookie(struct __sk_buff *skb) {
     return redirect(skb, &key);
 }
 
-SEC("sk_skb")
+SEC("sk_skb/stream_verdict")
 int probe_verdict_fixed(struct __sk_buff *skb) {
     struct probe_key key = {};
     key.cookie = 0;
     return redirect(skb, &key);
+}
+
+// 什么都不做，只用来区分「装载路径坏了」和「某个 helper 被拒」。
+SEC("sk_skb/stream_verdict")
+int probe_verdict_noop(struct __sk_buff *skb) {
+    return PROBE_PASS;
 }
 
 char _license[] SEC("license") = "GPL";
