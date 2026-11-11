@@ -538,7 +538,7 @@ func socketCookie(fd int) (uint64, error) {
 }
 
 func dumpStats(stats *ebpf.Map) {
-	labels := []string{"verdict_calls", "cookie_nonzero", "lookup_hit", "redirect_pass", "redirect_drop"}
+	labels := []string{"verdict_calls", "cookie_nonzero", "redirect_ok", "redirect_miss"}
 	fmt.Print("kernel counters:")
 	for index, label := range labels {
 		var value uint64

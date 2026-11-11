@@ -84,15 +84,18 @@ cross-netns: PASS（cookie=true）
 失败时会打印内核 verifier 日志（`LogLevelBranch|LogLevelStats` + `VerifierError.Log` 全文），
 `unsatisfied map reference` 这类是用户态装载方式的问题，不是内核拒绝。
 
-> 2026-11-11 修过两次：
+> 2026-11-11 修过三次：
 > 1. 最早直接 `ebpf.NewProgram(progSpec)` 单程序装载，程序里的 map 重定位没有被替换成
 >    map fd，内核侧报 `instruction N: unsatisfied map reference`。现在改成“每个程序各自
 >    一个只含单个程序的 collection”，map 由 collection 统一创建并解析引用。
 > 2. `sk_skb` 程序必须带 `expected_attach_type`，否则 `bpf_prog_load` 可能直接返回 `EINVAL`。
 >    现在对象里 section 改成 `sk_skb/stream_verdict`，Go 侧也显式设置
->    `AttachType = AttachSkSKBStreamVerdict`；另外失败时会打印**完整** verifier 日志
->    （`VerifierError.Log` 逐行），并用 `probe_verdict_noop` 区分“装载路径坏了”和
->    “某个 helper 被拒”。
+>    `AttachType = AttachSkSKBStreamVerdict`。
+> 3. **R6S 实机日志确认：`bpf_map_lookup_elem` 查 SOCKHASH 返回的是 socket 引用**
+>    （`R0=sock(ref_obj_id=4)`），不在 exit 前 `bpf_sk_release()` 就会被 verifier 判
+>    `Unreleased reference` / `reference leak`。现在程序不再预查表，命中/未命中直接看
+>    `bpf_sk_redirect_hash()` 的返回值（`SK_PASS`=命中并已重定向，`SK_DROP`=未命中），
+>    两条路径都返回 `SK_PASS`，未命中时数据按普通路径投递，不会静默丢包。
 
 ## 文件
 
