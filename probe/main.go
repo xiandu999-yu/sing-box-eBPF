@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -51,10 +52,11 @@ type env struct {
 
 func main() {
 	var (
-		mode    = flag.String("mode", "both", "same | cross | both")
-		chunkMB = flag.Int("mb", 16, "throughput test size in MiB")
-		child   = flag.String("child", "", "internal: run as netns child on this unix socket")
-		keep    = flag.Bool("keep", false, "keep probe netns/veth after exit")
+		mode     = flag.String("mode", "both", "same | cross | both")
+		chunkMB  = flag.Int("mb", 16, "throughput test size in MiB")
+		baseline = flag.Bool("baseline", false, "先跑一遍用户态 splice 转发作为基线（不装 BPF），用来看 A/B 差值")
+		child    = flag.String("child", "", "internal: run as netns child on this unix socket")
+		keep     = flag.Bool("keep", false, "keep probe netns/veth after exit")
 	)
 	flag.Parse()
 
@@ -66,15 +68,20 @@ func main() {
 		return
 	}
 
+	var uts unix.Utsname
+	if err := unix.Uname(&uts); err == nil {
+		fmt.Printf("kernel: %s %s\n", unix.ByteSliceToString(uts.Release[:]), runtime.GOARCH)
+	}
+
 	exit := 0
 	if *mode == "same" || *mode == "both" {
-		if err := runSameNetns(*chunkMB); err != nil {
+		if err := runSameNetns(*chunkMB, *baseline); err != nil {
 			fmt.Println("SAME-NETNS: FAIL:", err)
 			exit = 1
 		}
 	}
 	if *mode == "cross" || *mode == "both" {
-		if err := runCrossNetns(*chunkMB, *keep); err != nil {
+		if err := runCrossNetns(*chunkMB, *keep, *baseline); err != nil {
 			fmt.Println("CROSS-NETNS: FAIL:", err)
 			exit = 1
 		}
@@ -84,7 +91,7 @@ func main() {
 
 // ---------- 场景搭建 ----------
 
-func runSameNetns(chunkMB int) error {
+func runSameNetns(chunkMB int, baseline bool) error {
 	name := "same-netns"
 	fmt.Println("=== " + name + " ===")
 
@@ -131,10 +138,10 @@ func runSameNetns(chunkMB int) error {
 		outbound: outbound.(*net.TCPConn),
 		server:   server.(*net.TCPConn),
 	}
-	return runScenario(e, chunkMB)
+	return runScenario(e, chunkMB, baseline)
 }
 
-func runCrossNetns(chunkMB int, keep bool) error {
+func runCrossNetns(chunkMB int, keep bool, baseline bool) error {
 	name := "cross-netns"
 	fmt.Println("=== " + name + " ===")
 
@@ -190,7 +197,7 @@ func runCrossNetns(chunkMB int, keep bool) error {
 		outbound: outbound.(*net.TCPConn),
 		server:   server.(*net.TCPConn),
 	}
-	return runScenario(e, chunkMB)
+	return runScenario(e, chunkMB, baseline)
 }
 
 func startChild(nsName string) (*net.TCPConn, *net.TCPConn, func(), error) {
@@ -289,7 +296,10 @@ func runChild(sockPath string) error {
 
 // ---------- 核心场景 ----------
 
-func runScenario(e *env, chunkMB int) error {
+func runScenario(e *env, chunkMB int, baseline bool) error {
+	if baseline {
+		return runBaseline(e, chunkMB)
+	}
 	spec, err := loadSpec()
 	if err != nil {
 		return err
@@ -377,6 +387,22 @@ func runScenario(e *env, chunkMB int) error {
 	}
 	dumpStats(statsMap)
 	fmt.Printf("%s: PASS（cookie=%v）\n", e.name, useCookie)
+	return nil
+}
+
+// runBaseline 用用户态转发（io.Copy，Linux 上对两个 *net.TCPConn 走 splice）
+// 跑同样的四 socket 拓扑，作为 A/B 基线。
+func runBaseline(e *env, chunkMB int) error {
+	fmt.Println("userspace relay（splice）基线，不装 BPF")
+	go func() { _, _ = io.Copy(e.outbound, e.listener) }()
+	go func() { _, _ = io.Copy(e.listener, e.outbound) }()
+	if err := e.ping(true); err != nil {
+		return err
+	}
+	if err := e.throughput(chunkMB, true); err != nil {
+		return err
+	}
+	fmt.Printf("%s（baseline）: PASS\n", e.name)
 	return nil
 }
 

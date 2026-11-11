@@ -37,20 +37,51 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o tcp-offload-probe .
 # 只跑同 netns（不需要 iproute2）
 ./tcp-offload-probe -mode same
 
+# 先跑一遍用户态 splice 转发（不装 BPF）作为 A/B 基线
+./tcp-offload-probe -mode same -mb 64 -baseline
+
 # 出问题时保留 netns
 ./tcp-offload-probe -mode cross -keep
 ```
 
-`cross` 场景会临时建一个 `sbprobe` netns 并在里面建 L/C 两个 socket，通过 unix socket
-把 fd 传给父进程；R/S 在 host netns。拓扑和生产里“私有交付 netns 里的监听 socket +
-主 netns 的出站 socket”一致。
+## 实测（2026-11-11，OpenWrt R6S）
+
+```
+=== same-netns ===
+cookies: L=0x4241a3 R=0x4241a2
+client→server: ok
+server→client: ok
+throughput client→server: 64.0 MiB in 479ms = 1121.6 Mbps（单向，true）
+kernel counters: verdict_calls=1090 cookie_nonzero=1090 redirect_ok=1090 redirect_miss=0
+same-netns: PASS（cookie=true）
+=== cross-netns ===
+cookies: L=0x420ae1 R=0x420ae0
+client→server: ok
+server→client: ok
+throughput client→server: 64.0 MiB in 32ms = 16572.0 Mbps（单向，true）
+kernel counters: verdict_calls=1090 cookie_nonzero=1090 redirect_ok=1090 redirect_miss=0
+cross-netns: PASS（cookie=true）
+```
+
+结论：
+
+- **核心未知全部消除**：`sk_skb` verdict 里 `bpf_get_socket_cookie` 可用；`bpf_sk_redirect_hash`
+  的 egress 语义成立（`redirect_ok=1090`、`redirect_miss=0`）；**跨 netns 也成立**——这正是
+  生产拓扑（私有交付 netns 的监听 socket ↔ 主 netns 的出站 socket）。
+- 两次的 `verdict_calls=1090` 对应 64 MiB，说明 psock 是批量交付（≈61 KB/次），不是逐包。
+- 吞吐数字**不能当结论**：两个场景都是 loopback，且同一份数据在同一台机器上跑两次
+  差 14 倍（1121 vs 16572 Mbps），说明这组数字被调度/窗口/缓存噪声主导。要判断
+  “省了多少”，必须跑 `-baseline` 在同一台机器上做 A/B。
+
+还没证明的（都要 P1 才有答案）：真实网卡路径、用户态前缀冲刷、半关闭语义、
+积压保险丝、以及每连接两个 goroutine 的调度开销。
 
 ## 测试要素
 
 | # | 要素 | 观测点 | 通过标准 | 不通过意味着 |
 | --- | --- | --- | --- | --- |
 | 1 | 对象与程序加载 | 运行时是否打印 `cookie 程序加载失败`；两者都失败时会再试 `probe_verdict_noop` | noop 能装载（说明装载路径正常），cookie/fixed 装载成功 | noop 也失败 = 装载路径/程序类型本身有问题；只有 cookie 失败 = `bpf_get_socket_cookie` 不被 sk_skb 允许 |
-| 2 | cookie key | `kernel counters: cookie_nonzero>0 lookup_hit>0` | 两个计数都非 0 | `bpf_get_socket_cookie` 在 `sk_skb` 不可用 → 只能退回 fixed-key，做不了双向 |
+| 2 | cookie key | `kernel counters: cookie_nonzero>0 redirect_ok>0` | 两个计数都非 0 | `bpf_get_socket_cookie` 在 `sk_skb` 不可用 → 只能退回 fixed-key，做不了双向 |
 | 3 | 同 netns egress redirect | `client→server: ok` / `server→client: ok` | 两条都 ok | redirect 机制本身不通（helper 语义/attach 类型问题） |
 | 4 | 跨 netns redirect | `cross-netns: PASS` | ping/pong 双向都通 | 生产拓扑（私有 netns ↔ 主 netns）不可用，整个方案到此为止 |
 | 5 | 数据完整性 | `-mb N` 时写入字节 == 服务端读取字节 | 一致，无超时 | 中途丢数据 → 不能上生产 |
