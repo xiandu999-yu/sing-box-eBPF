@@ -11,10 +11,10 @@ index 7029ef38..5a2582cb 100644
  	TCNetworkNamespace              string
  	TCDeliveryInterfaceIndex        int
 diff --git a/box.go b/box.go
-index 143f1eab..1a29767f 100644
+index afe9afe7..2360a4ee 100644
 --- a/box.go
 +++ b/box.go
-@@ -114,6 +114,12 @@ func New(options Options) (*Box, error) {
+@@ -114,6 +114,12 @@ func New(options Options) (instance *Box, err error) {
  		ctx = context.Background()
  	}
  	ctx = service.ContextWithDefaultRegistry(ctx)
@@ -286,10 +286,10 @@ index 432d65d7..94f72e34 100644
  		diagnostics.TCRoutingTable = tc.NetworkInfo.RoutingTable
  		diagnostics.TCRoutingPriority = tc.NetworkInfo.RoutingPriority
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
-index 55e1e323..f577d904 100644
+index 61841b4a..0e825e70 100644
 --- a/protocol/ebpf/inbound.go
 +++ b/protocol/ebpf/inbound.go
-@@ -29,6 +29,11 @@ const (
+@@ -30,6 +30,11 @@ const (
  	dnsModeRespectPolicy         = "respect_policy"
  	dnsModeOff                   = "off"
  	defaultTCPriority            = 1
@@ -301,7 +301,7 @@ index 55e1e323..f577d904 100644
  )
  
  var (
-@@ -59,6 +64,7 @@ func RegisterInbound(registry *inbound.Registry) {
+@@ -60,6 +65,7 @@ func RegisterInbound(registry *inbound.Registry) {
  
  type inboundResources struct {
  	cgroupBackend          *commonEBPF.CgroupBackend
@@ -309,7 +309,7 @@ index 55e1e323..f577d904 100644
  	localRoutes            *commonEBPF.LocalRouteSet
  	selfBypass             *commonEBPF.SelfBypass
  	processTracker         processTrackerOwner
-@@ -166,10 +172,14 @@ type Inbound struct {
+@@ -167,10 +173,14 @@ type Inbound struct {
  	sharedIPv6                bool
  	sharedBypassPrivate       bool
  	localBypassPort           []portRange
@@ -324,7 +324,7 @@ index 55e1e323..f577d904 100644
  	fakeIPIPv4Prefix          netip.Prefix
  	fakeIPIPv6Prefix          netip.Prefix
  	fakeIPICMPReply           bool
-@@ -302,6 +312,24 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -305,6 +315,24 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  			return nil, E.New("eBPF self-bypass sockets were not prepared")
  		}
  	}
@@ -349,7 +349,7 @@ index 55e1e323..f577d904 100644
  	inbound := &Inbound{
  		Adapter:        inbound.NewAdapter(C.TypeEBPF, tag),
  		ctx:            ctx,
-@@ -330,10 +358,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -333,10 +361,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  		sharedIPv6:          sharedEnabled && enabledByDefault(options.Shared.IPv6),
  		sharedBypassPrivate: options.Shared.BypassPrivateAddress == nil || *options.Shared.BypassPrivateAddress,
  		localBypassPort:     localBypassPort,
@@ -364,7 +364,7 @@ index 55e1e323..f577d904 100644
  		sharedIncludeMAC:    sharedIncludeMAC,
  		sharedExcludeMAC:    sharedExcludeMAC,
  		localPolicy: localUIDPolicy{
-@@ -429,3 +461,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
+@@ -432,3 +464,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
  		break
  	}
  }
@@ -476,10 +476,10 @@ index 4781da99..370b8b3c 100644
  
  func (i *Inbound) monitoredDefaultInterfaceName() string {
 diff --git a/protocol/ebpf/lifecycle_close.go b/protocol/ebpf/lifecycle_close.go
-index 2a526435..18e8e75c 100644
+index 8fbf697e..68adfcd5 100644
 --- a/protocol/ebpf/lifecycle_close.go
 +++ b/protocol/ebpf/lifecycle_close.go
-@@ -58,6 +58,9 @@ func (i *Inbound) closeResources() error {
+@@ -65,6 +65,9 @@ func (i *Inbound) closeResources() error {
  			selfBypassErr = E.New("eBPF self-bypass remained open after close")
  		}
  	}
@@ -505,10 +505,10 @@ index 7f06bc5d..0eb8cf2e 100644
  	if err != nil {
  		return err
 diff --git a/protocol/ebpf/lifecycle_start.go b/protocol/ebpf/lifecycle_start.go
-index 1ab3c615..f976fad3 100644
+index 8008ce20..8ffc4bea 100644
 --- a/protocol/ebpf/lifecycle_start.go
 +++ b/protocol/ebpf/lifecycle_start.go
-@@ -113,6 +113,13 @@ func (i *Inbound) startInbound() error {
+@@ -122,6 +122,13 @@ func (i *Inbound) startInbound() error {
  		}
  		i.startCgroupRecoveryScheduler(cgroupBackend)
  		i.startCgroupUDPReleaseReader(cgroupBackend)
@@ -522,7 +522,7 @@ index 1ab3c615..f976fad3 100644
  	}
  	if backend != nil {
  		if err = backend.Enable(); err != nil {
-@@ -261,6 +268,9 @@ func (i *Inbound) startTCDataPlane(
+@@ -270,6 +277,9 @@ func (i *Inbound) startTCDataPlane(
  ) (*commonEBPF.TCBackend, tcRuntime, error) {
  	backendConfig := commonEBPF.TCConfig{
  		ListenerPort:      i.tcListeners.selectedPort(),
@@ -532,9 +532,9 @@ index 1ab3c615..f976fad3 100644
  		EnableLocal:       localEnabled,
  		EnableShared:      sharedEnabled,
  		EnableIPv4:        true,
-@@ -543,3 +553,25 @@ func combineStartError(startErr error, cleanupErr error) error {
+@@ -571,3 +581,25 @@ func (i *Inbound) claimSelfBypass() error {
  	}
- 	return E.Errors(startErr, E.Cause(cleanupErr, "cleanup eBPF inbound"))
+ 	return nil
  }
 +
 +func (i *Inbound) startProcessMarkers() error {

@@ -14,29 +14,26 @@
 
 ---
 
-## 0. 基准：`6dc5542f` / 模块 `d2983dce`（2026-11-11）
+## 0. 基准：`e74cfa22` / 模块 `d2983dce`（2026-11-13）
 
 `ci/pins.env` 现在是：
 
 | 固定点 | commit | 内容 |
 | --- | --- | --- |
-| `SING_BOX_COMMIT` | `6dc5542f` `document socket-local self-bypass` | 相对 `949d0cea` 是 9 个 commit：socket-local 自旁路后端、direct TGID 自旁路、生命周期拆分与诊断、inbound 数据面文档。三处结构体冲突（`EBPFRuntimeDiagnostics` / `EBPFDiagnostics` / 映射函数），已按上游新字段重排 |
-| `MODULE_COMMIT` | `d2983dce` `test socket-local storage lifetime` | 相对 `bec0ab94` 是 9 个 commit、58 个文件：socket-local 自旁路存储（`tc_storage` 对象）、direct TGID 自旁路（`self_bypass_tgid`）、生命周期拆分。6 处冲突 |
+| `SING_BOX_COMMIT` | `e74cfa22` `fix(ebpf): roll back self-bypass on box creation failure` | 相对 `6dc5542f` 是 3 个 commit、17 个文件：box 创建失败时回滚 self-bypass、跨 box 的重试清理、新增 `internal/ebpfcleanup` 注册表、`box_ebpf_cleanup*.go`、`route/network_ebpf.go`。补丁只有 1 处冲突（`lifecycle_start.go` 末尾） |
+| `MODULE_COMMIT` | `d2983dce` `test socket-local storage lifetime` | 不变。e74cfa22 的 `go.mod` 写的是更早的 `02db5a5`，`d2983dce` 是它的后继，API 只多不少 |
 
-**这轮最实质的变化：上游自己实现了「自身早退」。** 我们原来在 `sb_ebpf_cgroup_control`
-里加的 `owner_tgid`（+ Go 侧 `ownerTGID`、`is_owner_process()`）和上游新增的
-`self_bypass_tgid`（+ `SB_EBPF_DIRECT_TGID` 变体）是同一个东西、同一个 ABI 槽位。
-已把我们的整套删掉，改用上游的：控制块仍是 36 字节，`bypass_process` 的 pname 判定
-接在 `is_direct_self_bypassed(config)` 之后。模块补丁因此从 1852 行降到 1783 行、25 → 24 个文件
-（`cgroup_maps_test.go` 已经和上游一致，不再出现在补丁里）。
+**这跳唯一的冲突**：`protocol/ebpf/lifecycle_start.go` 末尾，上游加了 `claimSelfBypass()`，
+我们的 `startProcessMarkers()` / `closeProcessMarkers()` 也在同一位置，两边都保留。
 
-其余冲突都是同一形状的「两边各加字段」：`CgroupConfig`（上游 `selfBypassTGID` + 我们的
-`BypassProcess`/`MarkerOnly`）、`TCBackend`（上游 `selfStorage*` + 我们的 `delivery`/`tcx_*`）、
-`cgroup.bpf.c` 的 `get_current_comm` 声明与 pname 判定、`native/abi.h` 的 TGID 字段。
+更早的几跳记录：
 
-更早的几跳：`91bc15bf`（17 个 commit，self-bypass 先试 socket-mark 又回退、UDP generation
-隔离、策略合并、diagnostics schema）；`ed2bdc8` 把 eBPF inbound 拆成三个内嵌结构体，
-补丁按新结构重做；`d3217e2` 只改 `go.mod` / `go.sum`。
+| 固定点 | 内容 |
+| --- | --- |
+| `6dc5542f` | 9 个 commit：socket-local 自旁路后端、direct TGID 自旁路、生命周期拆分与诊断。三处结构体冲突已按上游新字段重排；**上游自己实现了「自身早退」**，我们原来的 `owner_tgid` / `is_owner_process()` 已删掉改用 `self_bypass_tgid`（模块补丁 1852 → 1783 行、25 → 24 文件） |
+| `91bc15bf` | 17 个 commit，self-bypass 先试 socket-mark 又回退、UDP generation 隔离、策略合并、diagnostics schema；模块 `CgroupConfig` 一处手工合并 |
+| `ed2bdc8` | 把 eBPF inbound 拆成 `inboundResources` / `inboundWorkers` / `inboundDiagnostics`，补丁按新结构重做 |
+| `d3217e2` | 只改 `go.mod` / `go.sum` |
 
 | 上游改动 | 补丁的应对 |
 | --- | --- |
@@ -46,6 +43,7 @@
 | `lifecycleAccess` 互斥量 + `logStartupSummaryLocked` / `runtimeSnapshotLocked` | 启动日志的三个字段（`delivery` / `delivery_used` / `bypass_process`）跟着搬进新函数 |
 | `CgroupConfig` 新增 `selfBypass *SelfBypass` / `selfBypassTGID` | 与我们的 `BypassProcess` / `MarkerOnly` 落在同一字段块，两边都保留 |
 | 上游 `self_bypass_tgid` + `is_direct_self_bypassed()` 取代我们的 `owner_tgid` + `is_owner_process()` | 删掉我们那套，pname 判定接在上游早退之后 |
+| 上游 `claimSelfBypass()`（box 生命周期接管） | 与我们的 marker 启停函数并列，互不影响 |
 
 `assemble-source` 里加了 **Verify patch anchors** 一步：补丁是行级 diff，上游再把函数挪走时
 照样能"应用成功"，所以逐个断言关键改动还在真正生效的代码上（尤其是缝在
