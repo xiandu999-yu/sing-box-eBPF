@@ -14,7 +14,7 @@ PKG_VERSION:=1.15.0-alpha.13
 PKG_RELEASE:=6
 
 PKG_SOURCE:=sing-box-src-1.15.0-alpha.13-46c9a91b20f0.tar.gz
-PKG_SOURCE_URL:=https://github.com/xiandu999-yu/sing-box-eBPF/releases/download/sing-box-src/
+PKG_SOURCE_URL:=https://github.com/xiandu999-yu/sing-box-eBPF/releases/download/sing-box-src/$(PKG_SOURCE)?
 PKG_HASH:=46c9a91b20f0e3290ef9afad130d38e9efa322270ca4e6155a78a4f3a09df539
 
 PKG_LICENSE:=GPL-3.0-or-later
