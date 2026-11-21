@@ -15,11 +15,11 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sing-box
 PKG_VERSION:=1.15.0-alpha.13
-PKG_RELEASE:=2
+PKG_RELEASE:=1
 
-PKG_SOURCE:=sing-box-src-1.15.0-alpha.13-6f6a73c6a729.tar.gz
+PKG_SOURCE:=sing-box-src-1.15.0-alpha.13-PLACEHOLDER.tar.gz
 PKG_SOURCE_URL:=https://github.com/xiandu999-yu/sing-box-eBPF/releases/download/sing-box-src/
-PKG_HASH:=6f6a73c6a7295cfa480ccba92e790fcd00256e2e868ce319f59b6b7a7d47dfa5
+PKG_HASH:=PLACEHOLDER
 
 PKG_LICENSE:=GPL-3.0-or-later
 PKG_LICENSE_FILES:=LICENSE
@@ -31,12 +31,27 @@ PKG_BUILD_PARALLEL:=1
 PKG_BUILD_FLAGS:=no-mips16
 
 # tarball 顶层是 sing-box/src（新包）或 sing-box/{src,module}（旧包）。
-# 注意 OpenWrt 的 golang-package 只把 PKG_BUILD_DIR（= .../src）拷进 GOPATH，
+# OpenWrt 的 golang-package 只把 PKG_BUILD_DIR（= .../src）拷进 GOPATH，
 # 兄弟目录 ../module 在那边不存在，所以：
 #   * 新 tarball：模块已经在 src/module，go.mod 是 replace => ./module；
 #   * 旧 tarball：下面 Build/Prepare 会把 module 挪进 src 并改写 replace。
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)/src
 
+GO_PKG:=github.com/sagernet/sing-box
+GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/sing-box
+GO_PKG_LDFLAGS:=-checklinkname=0 -s -w -buildid=
+GO_PKG_LDFLAGS_X:=$(GO_PKG)/constant.Version=$(PKG_VERSION)
+GO_PKG_TAGS:=with_ebpf,with_clash_api,with_quic,with_utls,with_gvisor,with_wireguard,badlinkname
+
+# package.mk 必须先于 golang-package.mk：BuildPackage（以及 compile/clean 目标）
+# 由 package.mk 定义，golang-package.mk 只提供 GO_PKG 那套钩子。
+# 缺了它，$(eval $(call BuildPackage,sing-box)) 就是空操作，make 会报
+# "No rule to make target 'compile'"。
+include $(INCLUDE_DIR)/package.mk
+include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
+
+# 必须放在 package.mk 之后：package.mk 末尾有 `Build/Prepare=$(call Build/Prepare/Default,)`，
+# 放在它前面会被覆盖回默认解包（<TAR> -C $(PKG_BUILD_DIR)，布局不对）。
 define Build/Prepare
 	rm -rf $(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
 	mkdir -p $(PKG_BUILD_DIR)
@@ -46,14 +61,6 @@ define Build/Prepare
 		sed -i 's#=> \.\./module#=> ./module#' $(PKG_BUILD_DIR)/go.mod; \
 	fi
 endef
-
-GO_PKG:=github.com/sagernet/sing-box
-GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/sing-box
-GO_PKG_LDFLAGS:=-checklinkname=0 -s -w -buildid=
-GO_PKG_LDFLAGS_X:=$(GO_PKG)/constant.Version=$(PKG_VERSION)
-GO_PKG_TAGS:=with_ebpf,with_clash_api,with_quic,with_utls,with_gvisor,with_wireguard,badlinkname
-
-include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
 
 define Package/sing-box
   SECTION:=net
