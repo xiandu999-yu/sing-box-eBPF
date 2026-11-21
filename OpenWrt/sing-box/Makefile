@@ -1,9 +1,12 @@
 # sing-box (CHIZI-0618 eBPF fork + sing-ebpf 模块)
 #
 # 源码来自本仓库 sing-box-src release 里组装好的 tarball：
-#   sing-box/src     ← sing-box（已打补丁）
-#   sing-box/module  ← sing-ebpf（已打补丁，含预编译 .o）
-# OpenWrt 侧不做模块拉取、不打补丁、不跑 clang。
+#   sing-box/src     ← sing-box（补丁已打、go.mod 已 replace 到 ../module）
+#   sing-box/module  ← sing-ebpf（补丁已打，.o 已生成）
+#
+# 所以这里【不要再放 patches/ 目录】——补丁在 CI 组装 tarball 时就打完了，
+# OpenWrt 再打一次会 "No file to patch" / "previously applied"。
+# 也不要在包目录里留 ./src，OpenWrt 的默认 Prepare 会把它拷进 build_dir 干扰解包。
 #
 # PKG_SOURCE / PKG_HASH 由 .github/workflows/assemble-source.yml 自动写回。
 
@@ -11,11 +14,11 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sing-box
 PKG_VERSION:=1.15.0-alpha.13
-PKG_RELEASE:=6
+PKG_RELEASE:=1
 
-PKG_SOURCE:=sing-box-src-1.15.0-alpha.13-46c9a91b20f0.tar.gz
-PKG_SOURCE_URL:=https://github.com/xiandu999-yu/sing-box-eBPF/releases/download/sing-box-src/$(PKG_SOURCE)?
-PKG_HASH:=46c9a91b20f0e3290ef9afad130d38e9efa322270ca4e6155a78a4f3a09df539
+PKG_SOURCE:=sing-box-src-1.15.0-alpha.13-PLACEHOLDER.tar.gz
+PKG_SOURCE_URL:=https://github.com/xiandu999-yu/sing-box-eBPF/releases/download/sing-box-src/
+PKG_HASH:=PLACEHOLDER
 
 PKG_LICENSE:=GPL-3.0-or-later
 PKG_LICENSE_FILES:=LICENSE
@@ -28,7 +31,9 @@ PKG_BUILD_FLAGS:=no-mips16
 
 # tarball 里是 sing-box/{src,module}，剥掉顶层后 src 就是模块根目录。
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)/src
-PKG_UNPACK:=$(HOST_TAR) -C $(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION) --strip-components=1 -xzf $(DL_DIR)/$(PKG_SOURCE)
+# 用 PATH 里的 tar：$(HOST_TAR) 在部分树上还没定义（会被展开成空，
+# 变成 "-C ..." 直接 command not found），$(TAR) 也依赖 staging 工具先就绪。
+PKG_UNPACK:=mkdir -p $(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION) && tar -C $(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION) --strip-components=1 -xzf $(DL_DIR)/$(PKG_SOURCE)
 
 GO_PKG:=github.com/sagernet/sing-box
 GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/sing-box
