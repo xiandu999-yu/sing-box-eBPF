@@ -318,6 +318,60 @@ psock ingress 队列 / EAGAIN 重试 / delayed work 在这个规模是净负担�
 `probe/tcp-offload-probe -mode same -mb 256 -baseline` 和同命令去掉 `-baseline`
 比 `MiB/cpu-s`，差距 <25% 就不用往下走。
 
+## 15. 2026-11-13：跟随 `e74cfa22`（box 生命周期回滚）
+
+sing-box 3 个 commit、17 个文件：box 创建失败时回滚 self-bypass、跨 box 的重试清理、
+新增 `internal/ebpfcleanup` 注册表和 `box_ebpf_cleanup*.go`、`route/network_ebpf.go`。
+
+补丁只有一处冲突：`protocol/ebpf/lifecycle_start.go` 末尾，上游加了 `claimSelfBypass()`
+（它把 inbound 启动时接管的 self-bypass 登记到 box 生命周期），我们的
+`startProcessMarkers()` / `closeProcessMarkers()` 也追加在同一位置。两边都保留即可，
+互不影响：`claimSelfBypass` 只管所有权转移，marker 只管 socket_assign 下的 pname 打标。
+
+模块固定点不动。注意 e74cfa22 的 `go.mod` 写的是 `02db5a5`（比 `d2983dce` 更早的模块
+commit），我们继续固定 `d2983dce`——它是 `02db5a5` 的后继，API 只多不少，实测编译通过。
+
+自检同前：zip 与 commit 树逐字节一致、pristine 上 `git apply --check` 通过、
+按 CI 顺序完整构建通过、`sing-box check` 通过、非法 `delivery` 仍被拒。
+
+## 16. 2026-11-21：tarball 改成单根 `src/`（模块挪进 `src/module`）
+
+OpenWrt 站内编译时踩到两个坑，第二个是设计问题：
+
+1. `PKG_UNPACK` 用了 `$(HOST_TAR)`，在没 build 完 host 工具的树上它是空的，
+   命令变成 `C ... --strip-components=1 -xzf ...` → `bash: C: command not found`，
+   解包失败但被标成 `Error 127 (ignored)`，后面一路错下去。现在改成显式
+   `Build/Prepare` + PATH 里的 `tar`。
+2. **更根本的**：OpenWrt 的 `golang-package` 只把 `PKG_BUILD_DIR`（= `.../src`）
+   拷进自己的 GOPATH 工作区：
+
+   ```
+   Copying files from .../sing-box-1.15.0-alpha.13/src
+     into .../src/.go_work/build/src/github.com/sagernet/sing-box
+   ```
+
+   旧布局 `sing-box/{src,module}` 里 `go.mod` 是 `replace ... => ../module`，
+   拷过去之后 `../module` 指向 `.go_work/build/src/module`（不存在），
+   于是 `go build` 直接 `go.mod file not found` / `no required module provides package`。
+
+所以组装布局改成：
+
+```
+sing-box/src/            ← 主模块（go.mod 里 replace => ./module）
+sing-box/src/module/     ← sing-ebpf
+```
+
+`assemble-source.yml` 现在把模块 clone 到 `$OUT/src/module`、`go mod edit -replace ...=./module`；
+`build.yml` 的 prepare 只打 `src`；`OpenWrt/sing-box/Makefile` 用 `Build/Prepare`
+解包，并且对**旧 tarball**（兄弟 `module/`）做兼容：发现 `module/` 就挪进 `src/`
+并 `sed` 改写 replace。
+
+已在本地用两种布局的假 tarball 跑过 `Build/Prepare` 逻辑，最终都收敛成
+`src/{go.mod,module/}` + `replace => ./module`，且模拟 GOPATH 拷贝后 `go.mod`
+与 `module/` 都在顶层。
+
+
+
 
 
 
