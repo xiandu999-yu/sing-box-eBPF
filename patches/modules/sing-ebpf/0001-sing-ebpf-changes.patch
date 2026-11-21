@@ -1,0 +1,1783 @@
+diff --git a/.github/workflows/generate-objects.yml b/.github/workflows/generate-objects.yml
+new file mode 100644
+index 0000000..0ef39f6
+--- /dev/null
++++ b/.github/workflows/generate-objects.yml
+@@ -0,0 +1,55 @@
++name: Generate BPF objects
++
++# 在本仓库内重新生成 eBPF 对象（bpfel/bpfeb）。
++# 手动触发 → 产物在 Artifacts 的 bpfgen 里；下载后提交回 internal/bpfgen/。
++#
++# 需要 NDK r29 Clang 21（Makefile 有版本硬校验）。
++
++on:
++  workflow_dispatch:
++
++permissions:
++  contents: read
++
++jobs:
++  generate:
++    name: Generate objects
++    runs-on: ubuntu-26.04
++    timeout-minutes: 40
++    steps:
++      - uses: actions/checkout@v6
++
++      - name: Setup Go
++        uses: actions/setup-go@v6
++        with:
++          go-version-file: go.mod
++          cache: true
++          cache-dependency-path: go.sum
++
++      - name: Setup Android NDK
++        id: setup-ndk
++        uses: nttld/setup-ndk@v1
++        with:
++          ndk-version: r29
++          add-to-path: false
++
++      - name: Generate BPF objects
++        env:
++          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
++        run: |
++          set -euo pipefail
++          before=$(sha256sum internal/bpfgen/tc_bpfel.o | cut -d' ' -f1)
++          echo "before: ${before}"
++          make generate
++          after=$(sha256sum internal/bpfgen/tc_bpfel.o | cut -d' ' -f1)
++          echo "after:  ${after}"
++          echo "--- changed:"
++          git status --short -- internal/bpfgen || true
++
++      - name: Upload generated objects
++        uses: actions/upload-artifact@v6
++        with:
++          name: bpfgen
++          path: internal/bpfgen
++          if-no-files-found: error
++          retention-days: 7
+diff --git a/api.go b/api.go
+index d01ad47..9b50f3b 100644
+--- a/api.go
++++ b/api.go
+@@ -147,6 +147,14 @@ type SelfBypass struct {
+ 	core.SelfBypassHandle
+ }
+ 
++// Compatibility aliases: the sing-box fork this tree is assembled with still
++// calls the pre-rename sweep API. Dev renamed it to the TC flow store names.
++type TCAssignmentSweepResult = core.TCFlowSweepResult
++
++func (b *TCBackend) SweepAssignments(maxIdle time.Duration, fallbackBudget uint32) (TCAssignmentSweepResult, error) {
++	return core.UnwrapTCBackend(b).SweepFlows(maxIdle, fallbackBudget)
++}
++
+ func NewSelfBypass() (*SelfBypass, error) {
+ 	backend, err := core.NewSelfBypass()
+ 	if err != nil {
+@@ -259,22 +267,72 @@ type CgroupConfig struct {
+ 	UDPTimeout   time.Duration
+ 	Policy       CompiledPolicy
+ 	SelfBypass   *SelfBypass
++	// BypassProcess lists process-name prefixes (task comm) that are never
++	// proxied. The match runs in the connect/sendmsg hook, i.e. in the caller's
++	// context, before every other selector including DNS handling.
++	BypassProcess []string
++	// MarkerOnly attaches the hooks only to flag process-bypassed sockets; the
++	// data plane stays with TC (socket_assign).
++	MarkerOnly bool
+ }
+ 
+ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+ 	return core.PrepareCgroupWithSelfBypass(core.CgroupConfig{
+-		Path:         config.Path,
+-		EnableTCP:    config.EnableTCP,
+-		EnableUDP:    config.EnableUDP,
+-		EnableIPv6:   config.EnableIPv6,
+-		RedirectIPv4: config.RedirectIPv4,
+-		RedirectIPv6: config.RedirectIPv6,
+-		MapCapacity:  config.MapCapacity,
+-		UDPTimeout:   config.UDPTimeout,
+-		Policy:       config.Policy,
++		Path:          config.Path,
++		EnableTCP:     config.EnableTCP,
++		EnableUDP:     config.EnableUDP,
++		EnableIPv6:    config.EnableIPv6,
++		RedirectIPv4:  config.RedirectIPv4,
++		RedirectIPv6:  config.RedirectIPv6,
++		MapCapacity:   config.MapCapacity,
++		UDPTimeout:    config.UDPTimeout,
++		Policy:        config.Policy,
++		BypassProcess: config.BypassProcess,
++		MarkerOnly:    config.MarkerOnly,
+ 	}, config.SelfBypass)
+ }
+ 
++// ProcessMarkerConfig configures the slimmed process-bypass markers: a copy of
++// the cgroup backend reduced to dae's split, where the cgroup layer only
++// identifies the process and flags the socket, and every packet stays with TC.
++type ProcessMarkerConfig struct {
++	Path          string
++	BypassProcess []string
++	SelfBypass    *SelfBypass
++}
++
++type ProcessMarkerBackend struct {
++	backend *core.ProcessMarkerBackend
++}
++
++func PrepareProcessMarker(config ProcessMarkerConfig) (*ProcessMarkerBackend, error) {
++	markerConfig := core.ProcessMarkerConfig{
++		Path:          config.Path,
++		BypassProcess: config.BypassProcess,
++	}
++	// The facade embeds the handle, so the socket map is only reachable through
++	// the internal unwrap (the public type exposes no raw maps).
++	if selfBypass := core.UnwrapSelfBypass(config.SelfBypass); selfBypass != nil {
++		markerConfig.SelfBypassMap = selfBypass.Map()
++	}
++	backend, err := core.PrepareProcessMarker(markerConfig)
++	if err != nil {
++		return nil, err
++	}
++	return &ProcessMarkerBackend{backend: backend}, nil
++}
++
++func (b *ProcessMarkerBackend) Close() error {
++	if b == nil || b.backend == nil {
++		return nil
++	}
++	return b.backend.Close()
++}
++
++func (b *ProcessMarkerBackend) IsClosed() bool {
++	return b == nil || b.backend == nil || b.backend.IsClosed()
++}
++
+ type ProcessTrackerConfig struct {
+ 	EnableTCP    bool
+ 	EnableUDP    bool
+@@ -296,15 +354,21 @@ func AttachProcessTracker(config ProcessTrackerConfig) (*ProcessTracker, error)
+ 
+ type TCConfig struct {
+ 	// TCP and UDP preserve their tuples in a required private listener namespace.
+-	ListenerPort       uint16
+-	EnableLocal        bool
+-	EnableShared       bool
+-	EnableIPv4         bool
+-	EnableLocalIPv6    bool
+-	EnableSharedIPv6   bool
+-	EnableTCP          bool
+-	EnableUDP          bool
+-	DeliveryInterface  uint32
++	ListenerPort      uint16
++	EnableLocal       bool
++	EnableShared      bool
++	EnableIPv4        bool
++	EnableLocalIPv6   bool
++	EnableSharedIPv6  bool
++	EnableTCP         bool
++	EnableUDP         bool
++	DeliveryInterface uint32
++	// Delivery selects the socket-assignment delivery link kind.
++	Delivery string
++	// TCXPriority orders TCX programs on the hook; lower runs first.
++	TCXPriority uint16
++	// TCXPosition picks the chain end when TCXPriority is unset: "head" or "tail".
++	TCXPosition        string
+ 	Policy             CompiledPolicy
+ 	RoutingMark        uint32
+ 	SelfBypass         *SelfBypass
+@@ -329,6 +393,9 @@ func PrepareTC(config TCConfig) (*TCBackend, error) {
+ 		EnableTCP:          config.EnableTCP,
+ 		EnableUDP:          config.EnableUDP,
+ 		DeliveryInterface:  config.DeliveryInterface,
++		Delivery:           config.Delivery,
++		TCXPriority:        config.TCXPriority,
++		TCXPosition:        config.TCXPosition,
+ 		Policy:             config.Policy,
+ 		RoutingMark:        config.RoutingMark,
+ 		TrackProcess:       config.TrackProcess,
+diff --git a/internal/core/access.go b/internal/core/access.go
+index ffd442d..91d9795 100644
+--- a/internal/core/access.go
++++ b/internal/core/access.go
+@@ -85,6 +85,30 @@ func NewTCBackendHandle(backend *TCBackend) TCBackendHandle {
+ 	return TCBackendHandle{backend: backend}
+ }
+ 
++// DeliveryKind reports the requested socket-assignment delivery link kind.
++func (h TCBackendHandle) DeliveryKind() string {
++	if h.backend == nil {
++		return ""
++	}
++	return h.backend.delivery
++}
++
++// TCXPosition reports the configured TCX chain end ("head" or "tail").
++func (h TCBackendHandle) TCXPosition() string {
++	if h.backend == nil {
++		return ""
++	}
++	return h.backend.tcxPosition
++}
++
++// TCXPriority reports the configured TCX ordering priority.
++func (h TCBackendHandle) TCXPriority() uint16 {
++	if h.backend == nil {
++		return 0
++	}
++	return h.backend.tcxPriority
++}
++
+ func (h TCBackendHandle) tcBackend() *TCBackend {
+ 	return h.backend
+ }
+diff --git a/internal/core/cgroup_abi.go b/internal/core/cgroup_abi.go
+index 71a112e..a7cd094 100644
+--- a/internal/core/cgroup_abi.go
++++ b/internal/core/cgroup_abi.go
+@@ -54,8 +54,16 @@ const (
+ 	cgroupFlagForceInterceptIPv6
+ 	cgroupFlagBypassPort
+ 	cgroupFlagUDPReleaseNotify
++	cgroupFlagProcessBypass
+ )
+ 
++// processLPMKey mirrors struct sb_ebpf_process_lpm_key: a bit-prefix over the
++// 16 byte task comm buffer.
++type processLPMKey struct {
++	PrefixLength uint32
++	Name         [16]byte
++}
++
+ type cgroupControl struct {
+ 	Flags                uint32
+ 	NetworkGeneration    uint32
+@@ -132,6 +140,14 @@ type CgroupConfig struct {
+ 	SelfBypassMap  *CiliumEBPF.Map
+ 	selfBypass     *SelfBypass
+ 	selfBypassTGID uint32
++	// BypassProcess lists process-name prefixes that are never proxied. The
++	// match runs in the connect/sendmsg hook, i.e. in the caller's context,
++	// and is evaluated before every other selector including DNS handling.
++	BypassProcess []string
++	// MarkerOnly attaches the hooks just to flag process-bypassed sockets and
++	// leaves interception to TC: every data-plane flag is cleared, so the
++	// hooks only run the owner and process checks and return.
++	MarkerOnly bool
+ }
+ 
+ func DefaultCgroupMapCapacity() CgroupMapCapacity {
+diff --git a/internal/core/cgroup_backend.go b/internal/core/cgroup_backend.go
+index 2726f3f..c80b970 100644
+--- a/internal/core/cgroup_backend.go
++++ b/internal/core/cgroup_backend.go
+@@ -108,6 +108,8 @@ type cgroupRuntime struct {
+ }
+ 
+ type CgroupBackend struct {
++	bypassProcess          []string
++	markerOnly             bool
+ 	access                 sync.RWMutex
+ 	health                 backendHealth
+ 	recovery               cgroupRecoveryStore
+@@ -171,14 +173,16 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+ 			return nil, err
+ 		}
+ 	}
+-	if !redirectIPv4.IsValid() && !redirectIPv6.IsValid() {
+-		return nil, E.New("missing eBPF redirect address")
+-	}
+-	if config.EnableIPv6 && !redirectIPv6.IsValid() {
+-		return nil, E.New("missing IPv6 eBPF redirect address")
+-	}
+-	if !redirectIPv4.IsValid() && !config.EnableIPv6 {
+-		return nil, E.New("eBPF cgroup backend has no enabled address family")
++	if !config.MarkerOnly {
++		if !redirectIPv4.IsValid() && !redirectIPv6.IsValid() {
++			return nil, E.New("missing eBPF redirect address")
++		}
++		if config.EnableIPv6 && !redirectIPv6.IsValid() {
++			return nil, E.New("missing IPv6 eBPF redirect address")
++		}
++		if !redirectIPv4.IsValid() && !config.EnableIPv6 {
++			return nil, E.New("eBPF cgroup backend has no enabled address family")
++		}
+ 	}
+ 	udpTimeoutSeconds := uint32(0)
+ 	if config.EnableUDP {
+@@ -241,12 +245,17 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+ 	socketReleaseSupported := false
+ 	skStorage := false
+ 	coarseTimeSupported := false
+-	if config.EnableUDP {
++	if config.EnableUDP && !config.MarkerOnly {
++		// A marker-only backend has no data plane, so it needs neither the coalesced
++		// clock nor the UDP release probe (which some kernels reject outright).
+ 		coarseTimeSupported = features.HaveProgramHelper(CiliumEBPF.CGroupSockAddr, asm.FnKtimeGetCoarseNs) == nil
+ 		socketReleaseSupported, err = probeSocketReleaseSupport(int(cgroupFile.Fd()))
+ 		if err != nil {
+-			closeCgroup()
+-			return nil, eBPFOperationError("probe socket release attachment", err)
++			// Some kernels refuse the probe outright (EINVAL) or disable the
++			// hook by policy. UDP cleanup is an optimisation, not a requirement:
++			// degrade instead of failing the whole data plane.
++			socketReleaseSupported = false
++			err = nil
+ 		}
+ 	}
+ 	if socketReleaseSupported &&
+@@ -293,6 +302,11 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+ 		}
+ 		return nil, err
+ 	}
++	if err = populateProcessBypass(runtimeState.maps["cgroup_process_bypass"], config.BypassProcess); err != nil {
++		_ = closeMaps(runtimeState.maps)
++		closeCgroup()
++		return nil, err
++	}
+ 	backend := &CgroupBackend{
+ 		mapCapacity:         mapCapacity,
+ 		runtime:             runtimeState,
+@@ -317,6 +331,8 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+ 		selfBypassTGID:      config.selfBypassTGID,
+ 		bypassIPv4CIDR:      slices.Clone(policy.localInitialBypass.ipv4),
+ 		bypassIPv6CIDR:      slices.Clone(policy.localInitialBypass.ipv6),
++		bypassProcess:       slices.Clone(config.BypassProcess),
++		markerOnly:          config.MarkerOnly,
+ 	}
+ 	runtimeState.direct_tgid = config.selfBypassTGID != 0
+ 	if err = populateCompiledPolicyMaps(policyMapTargets{
+diff --git a/internal/core/cgroup_maps.go b/internal/core/cgroup_maps.go
+index 752ce61..2089648 100644
+--- a/internal/core/cgroup_maps.go
++++ b/internal/core/cgroup_maps.go
+@@ -81,6 +81,7 @@ func prepareCgroupMaps(runtimeState *cgroupRuntime, capacity CgroupMapCapacity,
+ 		"cgroup_uid_policy":        {name: "sb_cg_uid", mapType: CiliumEBPF.LPMTrie, maxEntries: uidCapacity, flags: bpfFlagNoPrealloc},
+ 		"cgroup_bypass_ipv4":       {name: "sb_cg_bypass4", mapType: CiliumEBPF.LPMTrie, maxEntries: maxDestinationCIDRPolicyEntries, flags: bpfFlagNoPrealloc},
+ 		"cgroup_bypass_ipv6":       {name: "sb_cg_bypass6", mapType: CiliumEBPF.LPMTrie, maxEntries: maxDestinationCIDRPolicyEntries, flags: bpfFlagNoPrealloc},
++		"cgroup_process_bypass":    {name: "sb_cg_pname", mapType: CiliumEBPF.LPMTrie, maxEntries: maxProcessBypassEntries, flags: bpfFlagNoPrealloc},
+ 		"cgroup_host_ipv4":         {name: "sb_cg_host4", mapType: CiliumEBPF.Hash, maxEntries: maxHostAddressPolicyEntries, flags: bpfFlagNoPrealloc},
+ 		"cgroup_host_ipv6":         {name: "sb_cg_host6", mapType: CiliumEBPF.Hash, maxEntries: maxHostAddressPolicyEntries, flags: bpfFlagNoPrealloc},
+ 		"cgroup_udp_release_watch": {
+diff --git a/internal/core/cgroup_program.go b/internal/core/cgroup_program.go
+index f9f320a..1ad9566 100644
+--- a/internal/core/cgroup_program.go
++++ b/internal/core/cgroup_program.go
+@@ -30,7 +30,9 @@ func (b *CgroupBackend) loadPrograms(listenerPort uint16) error {
+ 			return eBPFOperationError("load eBPF cgroup programs", unix.EALREADY)
+ 		}
+ 	}
+-	if listenerPort == 0 {
++	// A marker-only backend never redirects, so it has no listener port; the
++	// control's data-plane flags are cleared and the port stays unused.
++	if listenerPort == 0 && !b.markerOnly {
+ 		return E.New("missing eBPF redirect listener port")
+ 	}
+ 	b.listenerPort = listenerPort
+@@ -158,7 +160,8 @@ func coarseTimeUnavailable(err error) bool {
+ }
+ 
+ func (b *CgroupBackend) validateCgroupProgramSet(programs []*CiliumEBPF.Program) error {
+-	if !b.runtime.enable_udp {
++	if b.markerOnly || !b.runtime.enable_udp {
++		// A marker-only backend attaches no UDP cleanup programs at all.
+ 		return nil
+ 	}
+ 	if len(programs) <= cgroupProgramSocketRelease {
+@@ -175,6 +178,17 @@ func (b *CgroupBackend) validateCgroupProgramSet(programs []*CiliumEBPF.Program)
+ }
+ 
+ func (b *CgroupBackend) cgroupProgramEnabled(slot int) bool {
++	if b.markerOnly {
++		// A marker-only backend has no redirect addresses and no data plane; the
++		// only thing it needs is the four connect/sendmsg hooks that can see the
++		// calling process.
++		switch slot {
++		case cgroupProgramConnect4, cgroupProgramUDP4Sendmsg, cgroupProgramConnect6, cgroupProgramUDP6Sendmsg:
++			return true
++		default:
++			return false
++		}
++	}
+ 	enableIPv4 := b.redirectIPv4.IsValid()
+ 	enableIPv6 := b.enableIPv6
+ 	switch slot {
+@@ -262,6 +276,17 @@ func (b *CgroupBackend) updateCgroupControl(listenerPort uint16) error {
+ 	if b.runtime.udp_release_observer {
+ 		flags |= cgroupFlagUDPReleaseNotify
+ 	}
++	if len(b.bypassProcess) > 0 {
++		flags |= cgroupFlagProcessBypass
++	}
++	if b.markerOnly {
++		// TC owns the data plane here: keep only the process flag so every hook
++		// falls through to the cheap checks and returns without rewriting.
++		flags = 0
++		if len(b.bypassProcess) > 0 {
++			flags = cgroupFlagProcessBypass
++		}
++	}
+ 	ipv4Prefix, ipv4HostMask := cgroupIPv4Redirect(b.redirectIPv4)
+ 	control := cgroupControl{
+ 		Flags:                flags,
+diff --git a/internal/core/diagnostics.go b/internal/core/diagnostics.go
+index 8c4079d..3303cbc 100644
+--- a/internal/core/diagnostics.go
++++ b/internal/core/diagnostics.go
+@@ -44,5 +44,7 @@ type TCDiagnostics struct {
+ 	RetiredAttachmentCount int
+ 	RetiredDeliveryCount   int
+ 	Priority               uint16
+-	RequiresRebuild        bool
++	// DeliveryKind is the delivery link actually created ("veth" or "netkit").
++	DeliveryKind    string
++	RequiresRebuild bool
+ }
+diff --git a/internal/core/marker.go b/internal/core/marker.go
+new file mode 100644
+index 0000000..cf420b8
+--- /dev/null
++++ b/internal/core/marker.go
+@@ -0,0 +1,151 @@
++//go:build with_ebpf && (linux || android)
++
++package core
++
++import (
++	CiliumEBPF "github.com/cilium/ebpf"
++	E "github.com/sagernet/sing/common/exceptions"
++	"golang.org/x/sys/unix"
++)
++
++// ProcessMarkerConfig configures the minimal process-bypass markers.
++type ProcessMarkerConfig struct {
++	// Path is the cgroup v2 directory to attach to; empty means the detected
++	// hierarchy root.
++	Path string
++	// BypassProcess lists process-name prefixes that must never be proxied.
++	BypassProcess []string
++	// SelfBypassMap is the socket metadata map shared with the TC data plane.
++	SelfBypassMap *CiliumEBPF.Map
++}
++
++// ProcessMarkerBackend attaches the four cgroup hooks that flag process-bypassed
++// sockets for the TC data plane. It deliberately owns no redirect state, no
++// listener port and no UDP cleanup machinery: it is the cgroup counterpart of
++// a filter that only tags sockets.
++type ProcessMarkerBackend struct {
++	collection *CiliumEBPF.Collection
++	links      []cgroupProgramLink
++	process    *CiliumEBPF.Map
++}
++
++var processMarkerSections = []struct {
++	name       string
++	attachType CiliumEBPF.AttachType
++}{
++	{"sb_marker_conn4", CiliumEBPF.AttachCGroupInet4Connect},
++	{"sb_marker_conn6", CiliumEBPF.AttachCGroupInet6Connect},
++	{"sb_marker_send4", CiliumEBPF.AttachCGroupUDP4Sendmsg},
++	{"sb_marker_send6", CiliumEBPF.AttachCGroupUDP6Sendmsg},
++}
++
++const (
++	processMarkerLPM     = "cgroup_process_bypass"
++	processMarkerSockets = "cgroup_socket_bypass"
++)
++
++// PrepareProcessMarker loads only the marker programs and their two maps from the
++// cgroup object and attaches them.
++func PrepareProcessMarker(config ProcessMarkerConfig) (*ProcessMarkerBackend, error) {
++	if config.SelfBypassMap == nil {
++		return nil, E.New("missing eBPF self-bypass map")
++	}
++	path := config.Path
++	if path == "" {
++		var err error
++		path, err = DetectCgroup2Root()
++		if err != nil {
++			return nil, err
++		}
++	}
++	if err := validateCgroup2Mount("cgroup", path); err != nil {
++		return nil, err
++	}
++	spec, err := loadCgroup()
++	if err != nil {
++		return nil, err
++	}
++	wanted := make(map[string]struct{}, len(processMarkerSections))
++	for _, section := range processMarkerSections {
++		wanted[section.name] = struct{}{}
++	}
++	for name := range spec.Programs {
++		if _, ok := wanted[name]; !ok {
++			delete(spec.Programs, name)
++		}
++	}
++	for name := range spec.Maps {
++		if name != processMarkerLPM && name != processMarkerSockets {
++			delete(spec.Maps, name)
++		}
++	}
++	processSpec, ok := spec.Maps[processMarkerLPM]
++	if !ok {
++		return nil, E.New("eBPF marker object is missing the process bypass map")
++	}
++	processSpec.MaxEntries = maxProcessBypassEntries
++	processSpec.Flags |= unix.BPF_F_NO_PREALLOC
++	if _, ok = spec.Maps[processMarkerSockets]; !ok {
++		return nil, E.New("eBPF marker object is missing the socket bypass map")
++	}
++	// The object declares the shared map with a placeholder capacity; the replacement
++	// must match the real map or the loader rejects it.
++	socketsSpec := spec.Maps[processMarkerSockets]
++	socketsSpec.Type = CiliumEBPF.LRUHash
++	socketsSpec.MaxEntries = config.SelfBypassMap.MaxEntries()
++	socketsSpec.Flags = 0
++	collection, err := CiliumEBPF.NewCollectionWithOptions(spec, CiliumEBPF.CollectionOptions{
++		MapReplacements: map[string]*CiliumEBPF.Map{processMarkerSockets: config.SelfBypassMap},
++	})
++	if err != nil {
++		return nil, eBPFOperationError("load eBPF process markers", err)
++	}
++	// The replaced map belongs to the caller: dropping it from the collection
++	// keeps Close from closing the self-bypass map the TC side still uses.
++	delete(collection.Maps, processMarkerSockets)
++	backend := &ProcessMarkerBackend{collection: collection, process: collection.Maps[processMarkerLPM]}
++	if err = populateProcessBypass(backend.process, config.BypassProcess); err != nil {
++		collection.Close()
++		return nil, err
++	}
++	for _, section := range processMarkerSections {
++		program := collection.Programs[section.name]
++		if program == nil {
++			backend.Close()
++			return nil, E.New("eBPF marker object is missing program ", section.name)
++		}
++		// Shared-only: a legacy single-program hook would have to displace the
++		// data plane program, which is never acceptable for an optional feature.
++		programLink, linkErr := attachCgroupProgramShared(path, program, section.attachType)
++		if linkErr != nil {
++			backend.Close()
++			return nil, eBPFOperationError("attach eBPF process marker "+section.name, linkErr)
++		}
++		backend.links = append(backend.links, programLink)
++	}
++	return backend, nil
++}
++
++// Close detaches every marker hook. The shared socket map is left alone.
++func (b *ProcessMarkerBackend) Close() error {
++	if b == nil {
++		return nil
++	}
++	var closeErr error
++	for _, link := range b.links {
++		closeErr = E.Errors(closeErr, link.Close())
++	}
++	b.links = nil
++	if b.collection != nil {
++		// Collection.Close reports nothing; programs and owned maps are released.
++		b.collection.Close()
++		b.collection = nil
++	}
++	b.process = nil
++	return closeErr
++}
++
++// IsClosed reports whether the markers have been detached.
++func (b *ProcessMarkerBackend) IsClosed() bool {
++	return b == nil || b.collection == nil
++}
+diff --git a/internal/core/process_bypass.go b/internal/core/process_bypass.go
+new file mode 100644
+index 0000000..80d573b
+--- /dev/null
++++ b/internal/core/process_bypass.go
+@@ -0,0 +1,57 @@
++//go:build with_ebpf && (linux || android)
++
++package core
++
++import (
++	CiliumEBPF "github.com/cilium/ebpf"
++	E "github.com/sagernet/sing/common/exceptions"
++)
++
++// maxProcessBypassEntries bounds the process-name LPM trie. One entry is one
++// configured prefix, so a handful is the normal case; the ceiling only stops a
++// pathological configuration from allocating an oversized map.
++const maxProcessBypassEntries = 256
++
++// maxProcessNameLength is TASK_COMM_LEN-1: bpf_get_current_comm fills 16 bytes
++// and the kernel truncates task->comm to 15 characters plus NUL.
++const maxProcessNameLength = 15
++
++// populateProcessBypass installs process-name prefixes into the LPM trie that
++// the cgroup hooks match against bpf_get_current_comm.
++func populateProcessBypass(processMap *CiliumEBPF.Map, names []string) error {
++	if len(names) == 0 || processMap == nil {
++		return nil
++	}
++	for _, name := range names {
++		entry, err := compileProcessBypassKey(name)
++		if err != nil {
++			return err
++		}
++		if err = processMap.Update(entry, uint8(1), 0); err != nil {
++			return E.Cause(err, "write eBPF bypass_process ", name)
++		}
++	}
++	return nil
++}
++
++// compileProcessBypassKey turns a configured name into an LPM key. The value is
++// a prefix match, so "transmission-da" also covers "transmission-daemon" after
++// the kernel truncated it.
++func compileProcessBypassKey(name string) (processLPMKey, error) {
++	var key processLPMKey
++	if name == "" {
++		return key, E.New("eBPF bypass_process entry is empty")
++	}
++	if len(name) > maxProcessNameLength {
++		return key, E.New("eBPF bypass_process ", name,
++			" is longer than the kernel's 15 byte comm limit; use its truncated form")
++	}
++	for index := 0; index < len(name); index++ {
++		if name[index] < 0x20 || name[index] > 0x7e {
++			return key, E.New("eBPF bypass_process must be printable ASCII: ", name)
++		}
++	}
++	copy(key.Name[:], name)
++	key.PrefixLength = uint32(len(name)) * 8
++	return key, nil
++}
+diff --git a/internal/core/tc.go b/internal/core/tc.go
+index 1fadbef..711573a 100644
+--- a/internal/core/tc.go
++++ b/internal/core/tc.go
+@@ -95,15 +95,22 @@ const (
+ )
+ 
+ type TCConfig struct {
+-	ListenerPort       uint16
+-	EnableLocal        bool
+-	EnableShared       bool
+-	EnableIPv4         bool
+-	EnableLocalIPv6    bool
+-	EnableSharedIPv6   bool
+-	EnableTCP          bool
+-	EnableUDP          bool
+-	DeliveryInterface  uint32
++	ListenerPort      uint16
++	EnableLocal       bool
++	EnableShared      bool
++	EnableIPv4        bool
++	EnableLocalIPv6   bool
++	EnableSharedIPv6  bool
++	EnableTCP         bool
++	EnableUDP         bool
++	DeliveryInterface uint32
++	// Delivery selects the socket-assignment delivery link kind: "" or "veth"
++	// (default), "netkit" (L2 framing), "netkit-l3" (experimental, same frames).
++	Delivery string
++	// TCXPriority orders TCX programs on the hook; lower runs first.
++	TCXPriority uint16
++	// TCXPosition picks the chain end when TCXPriority is unset: "head" or "tail".
++	TCXPosition        string
+ 	Policy             CompiledPolicy
+ 	RoutingMark        uint32
+ 	SelfBypassMap      *CiliumEBPF.Map
+@@ -175,6 +182,9 @@ type TCBackend struct {
+ 	tcpListenerMap      bool
+ 	programsExposed     bool
+ 	control             tcControl
++	delivery            string
++	tcxPosition         string
++	tcxPriority         uint16
+ 	controlMapFD        int
+ 	flowStore           tcFlowStore
+ 	selfMapExternal     bool
+@@ -334,6 +344,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
+ 		controlValue.Flags |= tcFlagSharedBypassIPv6
+ 	}
+ 	backend := &TCBackend{
++		delivery:       config.Delivery,
++		tcxPosition:    config.TCXPosition,
++		tcxPriority:    config.TCXPriority,
+ 		runtime:        &tcRuntime{maps: maps, programs: loadedPrograms},
+ 		tcpListenerMap: config.EnableTCP && !legacyTCP,
+ 		control:        controlValue,
+@@ -1032,6 +1045,14 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
+ func (b *TCBackend) DeliveryIngressProgramFD() int { return b.programFD(tcProgramDeliveryIngress) }
+ func (b *TCBackend) IsolatedReturnProgramFD() int  { return b.programFD(tcProgramIsolatedReturn) }
+ 
++func (b *TCBackend) DeliveryIngressProgram() *CiliumEBPF.Program {
++	return b.program(tcProgramDeliveryIngress)
++}
++
++func (b *TCBackend) IsolatedReturnProgram() *CiliumEBPF.Program {
++	return b.program(tcProgramIsolatedReturn)
++}
++
+ func (b *TCBackend) programFD(index int) int {
+ 	if b == nil {
+ 		return -1
+diff --git a/internal/core/tc_return.go b/internal/core/tc_return.go
+index 3b0daeb..c652629 100644
+--- a/internal/core/tc_return.go
++++ b/internal/core/tc_return.go
+@@ -93,7 +93,9 @@ func (b *TCBackend) AcquireReturnRoute(protocol uint8, source, destination netip
+ 		return TCReturnHandle{}, unix.ENOENT
+ 	}
+ 	if value.NetworkGeneration&tcReturnRetiring != 0 {
+-		return TCReturnHandle{}, E.New("TC return route is retiring")
++		return TCReturnHandle{}, E.New("TC return route is retiring (entry_generation=",
++			value.NetworkGeneration, " control_generation=", b.control.NetworkGeneration,
++			" last_seen_ns=", value.LastSeenNS)
+ 	}
+ 	return b.retainReturnRouteLocked(key, value), nil
+ }
+diff --git a/internal/core/tcx_order.go b/internal/core/tcx_order.go
+index 86c87a4..9992805 100644
+--- a/internal/core/tcx_order.go
++++ b/internal/core/tcx_order.go
+@@ -55,6 +55,17 @@ var (
+ // order. On a kernel without TCX it returns the same unsupported error as
+ // link.AttachTCX, which callers use to select the clsact fallback.
+ func AttachTCXOrdered(interfaceIndex int, attachType CiliumEBPF.AttachType, program *CiliumEBPF.Program, priority uint16) (link.Link, error) {
++	return attachTCXAt(interfaceIndex, attachType, program, priority, "")
++}
++
++// AttachTCXPositioned attaches program at an explicit chain position:
++// "head" runs before every existing program, including programs without a
++// priority marker; "tail" runs last; "" keeps the priority order.
++func AttachTCXPositioned(interfaceIndex int, attachType CiliumEBPF.AttachType, program *CiliumEBPF.Program, priority uint16, position string) (link.Link, error) {
++	return attachTCXAt(interfaceIndex, attachType, program, priority, position)
++}
++
++func attachTCXAt(interfaceIndex int, attachType CiliumEBPF.AttachType, program *CiliumEBPF.Program, priority uint16, position string) (link.Link, error) {
+ 	if program == nil {
+ 		return nil, E.New("TCX program is unavailable")
+ 	}
+@@ -81,9 +92,18 @@ func AttachTCXOrdered(interfaceIndex int, attachType CiliumEBPF.AttachType, prog
+ 			}
+ 			markerReady = true
+ 		}
+-		anchor, err := tcxPriorityAnchor(result.Programs, priority)
+-		if err != nil {
+-			return nil, E.Errors(ErrTCXOrderUnavailable, E.Cause(err, "read TCX priorities"))
++		var anchor link.Anchor
++		switch position {
++		case "head":
++			anchor = tcxHeadAnchor(result.Programs)
++		case "tail":
++			anchor = link.Tail()
++		default:
++			priorityAnchor, err := tcxPriorityAnchor(result.Programs, priority)
++			if err != nil {
++				return nil, E.Errors(ErrTCXOrderUnavailable, E.Cause(err, "read TCX priorities"))
++			}
++			anchor = priorityAnchor
+ 		}
+ 		attached, err := attachTCX(link.TCXOptions{
+ 			Interface:        interfaceIndex,
+@@ -104,6 +124,18 @@ func AttachTCXOrdered(interfaceIndex int, attachType CiliumEBPF.AttachType, prog
+ 	}
+ }
+ 
++// tcxHeadAnchor places the program before the first attached program, so it
++// runs first even when that program carries no priority marker.
++func tcxHeadAnchor(programs []link.AttachedProgram) link.Anchor {
++	for _, attached := range programs {
++		if linkID, linked := attached.LinkID(); linked {
++			return link.BeforeLinkByID(linkID)
++		}
++		return link.BeforeProgramByID(attached.ID)
++	}
++	return link.Tail()
++}
++
+ func tcxPriorityAnchor(programs []link.AttachedProgram, priority uint16) (link.Anchor, error) {
+ 	for _, attached := range programs {
+ 		other, marked, err := tcxProgramOrder(attached.ID)
+diff --git a/native/abi.h b/native/abi.h
+index 503dc7b..cb86aa3 100644
+--- a/native/abi.h
++++ b/native/abi.h
+@@ -33,6 +33,7 @@
+ #define SB_EBPF_CGROUP_FLAG_FORCE_INTERCEPT_IPV6 (1U << 16U)
+ #define SB_EBPF_CGROUP_FLAG_BYPASS_PORT (1U << 17U)
+ #define SB_EBPF_CGROUP_FLAG_UDP_RELEASE_NOTIFY (1U << 18U)
++#define SB_EBPF_CGROUP_FLAG_PROCESS_BYPASS (1U << 19U)
+ struct sb_ebpf_cgroup_control {
+     __u32 flags;
+     __u32 network_generation;
+@@ -147,4 +148,13 @@ struct sb_ebpf_ipv6_cidr_lpm_key {
+     __u8 addr[16];
+ };
+ 
++// LPM key for a process name (task->comm). prefixlen counts bits and the name
++// is zero padded to 16 bytes, so "curl" uses prefixlen 32 and matches "curl*".
++struct sb_ebpf_process_lpm_key {
++    __u32 prefixlen;
++    __u8 name[16];
++};
++
++_Static_assert(sizeof(struct sb_ebpf_process_lpm_key) == 20U, "unexpected process LPM key ABI");
++
+ #endif
+diff --git a/native/cgroup.bpf.c b/native/cgroup.bpf.c
+index ceec1c4..f4ab808 100644
+--- a/native/cgroup.bpf.c
++++ b/native/cgroup.bpf.c
+@@ -80,6 +80,7 @@ MAP(cgroup_uid_policy, struct sb_ebpf_uid_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE);
+ MAP(cgroup_bypass_port, struct sb_ebpf_port_key, __u8, BPF_MAP_TYPE_HASH);
+ MAP(cgroup_bypass_ipv4, struct sb_ebpf_ipv4_cidr_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE);
+ MAP(cgroup_bypass_ipv6, struct sb_ebpf_ipv6_cidr_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE);
++MAP(cgroup_process_bypass, struct sb_ebpf_process_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE);
+ MAP(cgroup_host_ipv4, struct sb_ebpf_ipv4_cidr_lpm_key, __u8, BPF_MAP_TYPE_HASH);
+ MAP(cgroup_host_ipv6, struct sb_ebpf_ipv6_cidr_lpm_key, __u8, BPF_MAP_TYPE_HASH);
+ MAP(cgroup_udp_release_watch, __u64, __u8, BPF_MAP_TYPE_HASH);
+@@ -101,6 +102,7 @@ static __u64 (*get_current_uid_gid)(void) = (void *)BPF_FUNC_get_current_uid_gid
+ #ifdef SB_EBPF_DIRECT_TGID
+ static __u64 (*get_current_pid_tgid)(void) = (void *)BPF_FUNC_get_current_pid_tgid;
+ #endif
++static long (*get_current_comm)(void *buf, __u32 size) = (void *)BPF_FUNC_get_current_comm;
+ static __u64 (*ktime_get_ns)(void) = (void *)BPF_FUNC_ktime_get_ns;
+ static long (*ringbuf_output)(void *ringbuf, void *data, __u64 size, __u64 flags) =
+     (void *)BPF_FUNC_ringbuf_output;
+@@ -173,6 +175,27 @@ INLINE bool is_direct_self_bypassed(const struct sb_ebpf_cgroup_control *config)
+ #endif
+ }
+ 
++// The decision is taken in the caller's context: cgroup connect/sendmsg hooks
++// run as the task that issued the syscall, so bpf_get_current_comm names the
++// program that owns the connection. Matched processes are never proxied.
++INLINE bool process_bypassed(void) {
++    struct sb_ebpf_process_lpm_key key = {.prefixlen = (__u32)sizeof(key.name) * 8U};
++    if (get_current_comm(key.name, sizeof(key.name)) != 0) return false;
++    return map_lookup(&cgroup_process_bypass, &key) != 0;
++}
++
++// mark_socket_bypass flags the socket for the TC side. The cgroup data plane
++// returns 1 by itself, but socket_assign is decided in TC, where the calling
++// process is invisible, so the decision has to travel as socket metadata.
++INLINE void mark_socket_bypass(__u64 cookie) {
++    if (cookie == 0U) return;
++    __u32 *existing = map_lookup(&cgroup_socket_bypass, &cookie);
++    __u32 metadata = existing != 0
++        ? (*existing | SB_EBPF_SOCKET_METADATA_SELF_BYPASS)
++        : SB_EBPF_SOCKET_METADATA_SELF_BYPASS;
++    map_update(&cgroup_socket_bypass, &cookie, &metadata, 0U);
++}
++
+ INLINE bool uid_bypassed(const struct sb_ebpf_cgroup_control *config) {
+     if ((config->flags & SB_EBPF_CGROUP_FLAG_UID_POLICY) == 0U) return false;
+     __u32 uid = network_order32((__u32)get_current_uid_gid());
+@@ -710,6 +733,13 @@ INLINE int handle_v4(
+     const struct sb_ebpf_cgroup_control *config = control();
+     if (config == 0) return 1;
+     if (is_direct_self_bypassed(config)) return 1;
++    // Excluded programs are decided here, before every other selector: no
++    // destination rewrite, no DNS handling, and the socket is flagged so the
++    // TC data plane skips it as well.
++    if ((config->flags & SB_EBPF_CGROUP_FLAG_PROCESS_BYPASS) != 0U && process_bypassed()) {
++        mark_socket_bypass(get_socket_cookie(ctx));
++        return 1;
++    }
+     __u8 protocol;
+     if (protocol_mode == CGROUP_PROTOCOL_TCP_ONLY) {
+         if (!connect_hook || ctx->protocol != TCP_VALUE) return 1;
+@@ -796,6 +826,12 @@ INLINE int handle_v6(
+     const struct sb_ebpf_cgroup_control *config = control();
+     if (config == 0) return 1;
+     if (is_direct_self_bypassed(config)) return 1;
++    // See handle_v4: the decision must precede every selector and travel to TC
++    // as socket metadata.
++    if ((config->flags & SB_EBPF_CGROUP_FLAG_PROCESS_BYPASS) != 0U && process_bypassed()) {
++        mark_socket_bypass(get_socket_cookie(ctx));
++        return 1;
++    }
+     __u32 address[4];
+     __builtin_memcpy(address, ctx->user_ip6, sizeof(address));
+     __u8 protocol;
+@@ -1166,4 +1202,21 @@ INLINE int release_socket_notify(struct bpf_sock *ctx) {
+ SEC("cgroup/sock_release_cookie") int sb_ebpf_rel_cookie(struct bpf_sock *ctx) { return release_socket(ctx); }
+ SEC("cgroup/sock_release_notify") int sb_ebpf_rel_notify(struct bpf_sock *ctx) { return release_socket_notify(ctx); }
+ 
++
++// Minimal process-bypass markers. When the interception happens in TC
++// (local.data_plane=socket_assign) the full data plane must not be attached,
++// because it would rewrite the destination as well. These four hooks only run
++// the process check and flag the socket, then hand the packet back untouched.
++// They use no control map: the marker loader drops every other map.
++#define SB_MARKER(ctx)                                                      \
++    do {                                                                    \
++        if (process_bypassed()) mark_socket_bypass(get_socket_cookie(ctx)); \
++        return 1;                                                           \
++    } while (0)
++
++SEC("cgroup/connect4") int sb_marker_conn4(struct bpf_sock_addr *ctx) { SB_MARKER(ctx); }
++SEC("cgroup/connect6") int sb_marker_conn6(struct bpf_sock_addr *ctx) { SB_MARKER(ctx); }
++SEC("cgroup/sendmsg4") int sb_marker_send4(struct bpf_sock_addr *ctx) { SB_MARKER(ctx); }
++SEC("cgroup/sendmsg6") int sb_marker_send6(struct bpf_sock_addr *ctx) { SB_MARKER(ctx); }
++
+ char _license[] SEC("license") = "GPL";
+diff --git a/runtime/api.go b/runtime/api.go
+index e21cb55..339b838 100644
+--- a/runtime/api.go
++++ b/runtime/api.go
+@@ -45,6 +45,8 @@ type TCRuntime interface {
+ 	Reconcile(localInterface string, sharedInterfaces []string, hostAddresses []netip.Addr) error
+ 	HealthCheck(localInterface string, sharedInterfaces []string, hostAddresses []netip.Addr) (bool, error)
+ 	RepairInfrastructure() (bool, error)
++	// LastRepair reports which half of the previous repair pass changed.
++	LastRepair() (routing bool, delivery bool)
+ 	AttachmentStateChanged(localInterface string, sharedInterfaces []string) (bool, error)
+ 	AttachmentDescriptions() []string
+ 	AttachmentDiagnostics() []core.AttachmentInfo
+@@ -155,6 +157,10 @@ func (d *tcDataPlane) TCDiagnostics() core.TCDiagnostics {
+ 		info.RoutingPriority = d.routing.priority
+ 		info.RoutingSlot = d.routing.slot
+ 	}
++	deliveryKind := ""
++	if d.delivery != nil {
++		deliveryKind = d.delivery.deliveryKind
++	}
+ 	mode := ""
+ 	for _, attachment := range d.attachments {
+ 		if attachment.attachmentType == "" {
+@@ -180,6 +186,7 @@ func (d *tcDataPlane) TCDiagnostics() core.TCDiagnostics {
+ 		RetiredAttachmentCount: len(d.retiredAttachments),
+ 		RetiredDeliveryCount:   len(d.retiredDeliveries),
+ 		Priority:               d.priority,
++		DeliveryKind:           deliveryKind,
+ 		RequiresRebuild:        requiresRebuild,
+ 	}
+ }
+@@ -192,6 +199,14 @@ func (d *tcDataPlane) HealthCheck(localInterface string, sharedInterfaces []stri
+ 	return d.healthCheck(localInterface, sharedInterfaces, hostAddresses)
+ }
+ 
++// LastRepair reports which half of the previous RepairInfrastructure pass
++// asked for a change. Diagnostics-only probe.
++func (d *tcDataPlane) LastRepair() (routing bool, delivery bool) {
++	d.access.Lock()
++	defer d.access.Unlock()
++	return d.lastRoutingChanged, d.lastDeliveryChanged
++}
++
+ func (d *tcDataPlane) RepairInfrastructure() (bool, error) {
+ 	return d.repairInfrastructure()
+ }
+diff --git a/runtime/core_access.go b/runtime/core_access.go
+index b469b01..4bbc333 100644
+--- a/runtime/core_access.go
++++ b/runtime/core_access.go
+@@ -18,3 +18,6 @@ func rawSharedPacketRewriteBackend(backend *public.SharedPacketRewriteBackend) *
+ // coreAttachTCXOrdered is a variable so tests can observe the priority each
+ // TCX attach requests without a TCX kernel.
+ var coreAttachTCXOrdered = core.AttachTCXOrdered
++
++// coreAttachTCXPositioned is the positioned variant used by head/tail.
++var coreAttachTCXPositioned = core.AttachTCXPositioned
+diff --git a/runtime/tc_dataplane.go b/runtime/tc_dataplane.go
+index 31d06ac..8d1bb27 100644
+--- a/runtime/tc_dataplane.go
++++ b/runtime/tc_dataplane.go
+@@ -29,6 +29,7 @@ const (
+ )
+ 
+ var tcVethSequence atomic.Uint32
++
+ var tcxSupport atomic.Int32
+ 
+ const (
+@@ -110,9 +111,14 @@ type tcDeliveryLink struct {
+ 	replyMTU     int
+ 	redirectName string
+ 	deliveryName string
++	deliveryKind string
+ 	redirect     netlink.Link
+ 	delivery     netlink.Link
+ 	filter       *netlink.BpfFilter
++	// returnLink / deliverLink hold the TCX attachments when the hook is not
++	// on clsact. Exactly one of link and filter is set per hook.
++	returnLink  tcxAttachedLink
++	deliverLink tcxAttachedLink
+ 	// deliveryMAC is the private end's address programmed into the backend
+ 	// as every redirected frame's destination.
+ 	deliveryMAC commonEBPF.MACAddress
+@@ -124,6 +130,7 @@ type tcDataPlane struct {
+ 	replyMTU              int
+ 	access                sync.Mutex
+ 	backend               *commonEBPF.TCBackend
++	deliveryKind          string
+ 	routing               *tcPolicyRouting
+ 	delivery              *tcDeliveryLink
+ 	attachments           []*tcInterfaceAttachment
+@@ -139,6 +146,10 @@ type tcDataPlane struct {
+ 	// interfaces, which is the only way to reach the ordering between releasing
+ 	// an attachment and taking the interface lock of the one that replaced it.
+ 	hooks *tcDataPlaneHooks
++	// Probe fields: which half of RepairInfrastructure actually reported a
++	// change. Diagnostics-only; they are not part of the data path.
++	lastRoutingChanged  bool
++	lastDeliveryChanged bool
+ }
+ 
+ func (d *tcDataPlane) retainRetiredAttachment(attachment *tcInterfaceAttachment) {
+@@ -211,6 +222,9 @@ func startTCDataPlane(
+ 	namespace *TCNamespace,
+ ) (*tcDataPlane, error) {
+ 	dataPlane := &tcDataPlane{backend: backend, sharedSourceMACPolicy: sharedSourceMACPolicy, priority: priority}
++	if backend != nil {
++		dataPlane.deliveryKind = backend.DeliveryKind()
++	}
+ 	dataPlane.namespace = namespace
+ 	dataPlane.enableIPv6 = enableIPv6
+ 	cleanup := func(startErr error) (*tcDataPlane, error) {
+@@ -525,6 +539,36 @@ func (a *tcInterfaceAttachment) attachSlotFilter(
+ 	return attachFilter(link, identity.parent, programFD, identity.name, identity.handle, priority)
+ }
+ 
++// tcxPriorityOf returns the configured TCX order, falling back to the clsact
++// filter priority when the caller left it unset.
++// tcxAttach attaches through TCX, honoring an explicit chain position when
++// tcx_priority is unset.
++func tcxAttach(interfaceIndex int, attachType CiliumEBPF.AttachType, program *CiliumEBPF.Program, backend *commonEBPF.TCBackend, fallback uint16) (link.Link, error) {
++	priority := tcxPriorityOf(backend, fallback)
++	if backend != nil && backend.TCXPriority() == 0 {
++		switch backend.TCXPosition() {
++		case "head", "tail":
++			return coreAttachTCXPositioned(interfaceIndex, attachType, program, priority, backend.TCXPosition())
++		}
++	}
++	return coreAttachTCXOrdered(interfaceIndex, attachType, program, priority)
++}
++
++func tcxPriorityOf(backend *commonEBPF.TCBackend, fallback uint16) uint16 {
++	if backend != nil {
++		if value := backend.TCXPriority(); value != 0 {
++			return value
++		}
++		switch backend.TCXPosition() {
++		case "tail":
++			return ^uint16(0)
++		case "head":
++			return DefaultTCPriority
++		}
++	}
++	return fallback
++}
++
+ func tcxUnsupportedError(err error) bool {
+ 	return err != nil && (errors.Is(err, CiliumEBPF.ErrNotSupported) ||
+ 		errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS) ||
+@@ -557,7 +601,8 @@ func attachTCXInterface(linkDevice netlink.Link, backend *commonEBPF.TCBackend,
+ 			continue
+ 		}
+ 		mainLink, icmpLink, err := attachTCXProgramPair(
+-			linkDevice.Attrs().Index, pair.attachType, pair.program, pair.icmpProgram, icmpEchoReplyEnabled, pair.role, priority,
++			linkDevice.Attrs().Index, pair.attachType, pair.program, pair.icmpProgram, icmpEchoReplyEnabled, pair.role,
++			backend, priority,
+ 		)
+ 		if err != nil {
+ 			return closeLinks(err)
+@@ -575,12 +620,13 @@ func attachTCXProgramPair(
+ 	icmpProgram *CiliumEBPF.Program,
+ 	icmpEnabled bool,
+ 	role string,
++	backend *commonEBPF.TCBackend,
+ 	priority uint16,
+ ) (link.Link, link.Link, error) {
+ 	if program == nil {
+ 		return nil, nil, E.New("TC eBPF ", role, " program is unavailable")
+ 	}
+-	mainLink, err := coreAttachTCXOrdered(interfaceIndex, attachType, program, priority)
++	mainLink, err := tcxAttach(interfaceIndex, attachType, program, backend, priority)
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+@@ -590,7 +636,7 @@ func attachTCXProgramPair(
+ 	if icmpProgram == nil {
+ 		return nil, nil, E.Errors(E.New("icmp_echo_reply ", role, " reply program is unavailable"), mainLink.Close())
+ 	}
+-	icmpLink, err := coreAttachTCXOrdered(interfaceIndex, attachType, icmpProgram, priority)
++	icmpLink, err := tcxAttach(interfaceIndex, attachType, icmpProgram, backend, priority)
+ 	if err != nil {
+ 		return nil, nil, E.Errors(err, mainLink.Close())
+ 	}
+@@ -782,7 +828,7 @@ func updateTCXInterfaceAttachment(
+ 		added := false
+ 		if attached == nil {
+ 			var err error
+-			attached, err = coreAttachTCXOrdered(linkDevice.Attrs().Index, attachType, program, priority)
++			attached, err = tcxAttach(linkDevice.Attrs().Index, attachType, program, backend, priority)
+ 			if err != nil {
+ 				return err
+ 			}
+@@ -815,7 +861,7 @@ func updateTCXInterfaceAttachment(
+ 				}
+ 				return startErr
+ 			}
+-			icmpAttached, err := coreAttachTCXOrdered(linkDevice.Attrs().Index, attachType, icmpProgram, priority)
++			icmpAttached, err := tcxAttach(linkDevice.Attrs().Index, attachType, icmpProgram, backend, priority)
+ 			if err != nil {
+ 				if added {
+ 					return E.Errors(err, closeTCXRoleLink(attachment, local))
+diff --git a/runtime/tc_delivery.go b/runtime/tc_delivery.go
+index 40d3943..ef4b7c0 100644
+--- a/runtime/tc_delivery.go
++++ b/runtime/tc_delivery.go
+@@ -4,13 +4,16 @@ package runtime
+ 
+ import (
+ 	"crypto/rand"
++	"encoding/hex"
+ 	"errors"
+-	"fmt"
+ 	"net"
+ 	"os"
+ 	"strings"
+ 
++	CiliumEBPF "github.com/cilium/ebpf"
++
+ 	commonEBPF "github.com/CHIZI-0618/sing-ebpf"
++	intcore "github.com/CHIZI-0618/sing-ebpf/internal/core"
+ 	"github.com/sagernet/netlink"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	"golang.org/x/sys/unix"
+@@ -46,13 +49,34 @@ func tcDeliveryMACAddress(link netlink.Link) (commonEBPF.MACAddress, bool) {
+ }
+ 
+ func nextTCVethNames() (string, string, error) {
++	return nextTCDeliveryNames(DeliveryVeth)
++}
++
++// nextTCDeliveryNames allocates the host and peer names of one delivery pair.
++// Linux caps interface names at 15 characters, so "sing-box-veth-<random>"
++// does not fit; the "sb-" prefix keeps the device kind readable within the
++// limit. Only concrete kinds are named: "auto" is resolved into netkit or veth
++// before this runs, so the name always matches what is mounted.
++func nextTCDeliveryNames(kind string) (string, string, error) {
++	prefix := "sb-veth-"
++	suffixLength := 6
++	if kind == DeliveryNetkit || kind == DeliveryNetkitL3 {
++		prefix = "sb-netkit-"
++		suffixLength = 5
++	}
+ 	for range 1024 {
+-		sequence := tcVethSequence.Add(1)
+-		suffix := fmt.Sprintf("%04x%04x", uint32(os.Getpid())&0xffff, sequence&0xffff)
+-		redirectName := "sbt" + suffix
+-		deliveryName := "sbd" + suffix
+-		if len(redirectName) > 15 || len(deliveryName) > 15 {
+-			return "", "", E.New("TC eBPF delivery link name exceeds Linux limit")
++		redirectSuffix, err := newTCDeliveryNameSuffix(suffixLength)
++		if err != nil {
++			return "", "", err
++		}
++		deliverySuffix, err := newTCDeliveryNameSuffix(suffixLength)
++		if err != nil {
++			return "", "", err
++		}
++		redirectName := prefix + redirectSuffix
++		deliveryName := prefix + deliverySuffix
++		if redirectName == deliveryName {
++			continue
+ 		}
+ 		_, redirectErr := netlink.LinkByName(redirectName)
+ 		_, deliveryErr := netlink.LinkByName(deliveryName)
+@@ -69,6 +93,77 @@ func nextTCVethNames() (string, string, error) {
+ 	return "", "", E.New("unable to allocate TC eBPF delivery link name")
+ }
+ 
++func newTCDeliveryNameSuffix(length int) (string, error) {
++	raw := make([]byte, (length+1)/2)
++	if _, err := rand.Read(raw); err != nil {
++		return "", err
++	}
++	return hex.EncodeToString(raw)[:length], nil
++}
++
++// attachTCDeliveryHook attaches one delivery hook, preferring TCX and falling
++// back to clsact when TCX is unavailable on this kernel or hook. The delivery
++// link is created on demand, so the hook order must follow the configured
++// TCX position instead of always landing behind clsact programs.
++func attachTCDeliveryHook(device netlink.Link, program *CiliumEBPF.Program, programFD int, name string,
++	handle, priority uint16, backend *commonEBPF.TCBackend) (tcxAttachedLink, *netlink.BpfFilter, error) {
++	if program != nil {
++		attached, err := tcxAttach(device.Attrs().Index, CiliumEBPF.AttachTCXIngress, program, backend, priority)
++		if err == nil {
++			return attached, nil, nil
++		}
++		if !tcxUnsupportedError(err) && !errors.Is(err, intcore.ErrTCXOrderUnavailable) {
++			return nil, nil, E.Cause(err, "attach TCX ", name)
++		}
++	}
++	if err := ensureTCClsact(device); err != nil {
++		return nil, nil, err
++	}
++	filter, err := attachTCFilter(device, netlink.HANDLE_MIN_INGRESS, programFD, name, handle, priority)
++	if err != nil {
++		return nil, nil, err
++	}
++	return nil, filter, nil
++}
++
++func deliveryHookAttached(attached tcxAttachedLink, filter *netlink.BpfFilter, device netlink.Link,
++	name string, handle, priority uint16) (bool, error) {
++	if attached != nil {
++		return tcxLinkAttached(attached, device.Attrs().Index, CiliumEBPF.AttachTCXIngress)
++	}
++	return tcFilterAttached(device, netlink.HANDLE_MIN_INGRESS, name, handle, priority)
++}
++
++func closeTCDeliveryHook(attached *tcxAttachedLink, filter **netlink.BpfFilter) error {
++	if *attached != nil {
++		err := (*attached).Close()
++		if err == nil {
++			*attached = nil
++		}
++		return err
++	}
++	return detachTCFilterOwned(filter)
++}
++
++func repairTCDeliveryHook(attached *tcxAttachedLink, filter **netlink.BpfFilter, device netlink.Link,
++	program *CiliumEBPF.Program, programFD int, name string, handle, priority uint16,
++	backend *commonEBPF.TCBackend) (bool, error) {
++	live, err := deliveryHookAttached(*attached, *filter, device, name, handle, priority)
++	if err != nil || live {
++		return false, err
++	}
++	if *attached != nil {
++		_ = (*attached).Close()
++		*attached = nil
++	}
++	newLink, newFilter, err := attachTCDeliveryHook(device, program, programFD, name, handle, priority, backend)
++	if err != nil {
++		return false, err
++	}
++	*attached, *filter = newLink, newFilter
++	return true, nil
++}
++
+ // These settings are applied only inside the caller-owned private namespace.
+ // Namespace destruction owns their lifetime; no host-global restore list exists.
+ // tcNamespaceTimeWaitPath bounds TIME_WAIT sockets of the namespace that runs
+diff --git a/runtime/tc_delivery_link_netns_test.go b/runtime/tc_delivery_link_netns_test.go
+index 03778a4..42d23cb 100644
+--- a/runtime/tc_delivery_link_netns_test.go
++++ b/runtime/tc_delivery_link_netns_test.go
+@@ -23,7 +23,7 @@ func deliveryPairLeftBehind(t *testing.T) []string {
+ 	var leftBehind []string
+ 	for _, device := range links {
+ 		name := device.Attrs().Name
+-		if strings.HasPrefix(name, "sbt") || strings.HasPrefix(name, "sbd") {
++		if strings.HasPrefix(name, "sb-veth-") || strings.HasPrefix(name, "sb-netkit-") {
+ 			leftBehind = append(leftBehind, name)
+ 		}
+ 	}
+diff --git a/runtime/tc_delivery_netkit_test.go b/runtime/tc_delivery_netkit_test.go
+new file mode 100644
+index 0000000..8543573
+--- /dev/null
++++ b/runtime/tc_delivery_netkit_test.go
+@@ -0,0 +1,44 @@
++//go:build with_ebpf && linux && ebpf_integration
++
++package runtime
++
++import (
++	"errors"
++	"os"
++	"testing"
++
++	"golang.org/x/sys/unix"
++)
++
++// TestProbeDeliveryNetkit needs root and a kernel with netkit support (6.7+).
++// It creates and immediately removes a pair in the current namespace.
++func TestProbeDeliveryNetkit(t *testing.T) {
++	if os.Geteuid() != 0 {
++		t.Skip("requires root")
++	}
++	actual, err := ProbeDelivery(DeliveryNetkit)
++	if err != nil {
++		if tcxUnsupportedError(err) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS) {
++			t.Skipf("netkit unavailable on this kernel: %v", err)
++		}
++		t.Fatalf("probe netkit: %v", err)
++	}
++	if actual != DeliveryNetkit {
++		t.Fatalf("created %q, want %q", actual, DeliveryNetkit)
++	}
++}
++
++// TestProbeDeliveryVeth is the baseline: it must work on every supported
++// kernel, so a failure here is a real regression.
++func TestProbeDeliveryVeth(t *testing.T) {
++	if os.Geteuid() != 0 {
++		t.Skip("requires root")
++	}
++	actual, err := ProbeDelivery(DeliveryVeth)
++	if err != nil {
++		t.Fatalf("probe veth: %v", err)
++	}
++	if actual != DeliveryVeth {
++		t.Fatalf("created %q, want %q", actual, DeliveryVeth)
++	}
++}
+diff --git a/runtime/tc_isolated_delivery.go b/runtime/tc_isolated_delivery.go
+index 89c53ff..d9dcc4b 100644
+--- a/runtime/tc_isolated_delivery.go
++++ b/runtime/tc_isolated_delivery.go
+@@ -51,10 +51,6 @@ func (d *tcDataPlane) inNamespace(block func() error) error {
+ }
+ 
+ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+-	hostName, peerName, err := nextTCVethNames()
+-	if err != nil {
+-		return nil, err
+-	}
+ 	hostAddress, err := newTCDeliveryHardwareAddress()
+ 	if err != nil {
+ 		return nil, E.Cause(err, "generate TC eBPF redirect link address")
+@@ -69,20 +65,22 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+ 		n.access.RUnlock()
+ 		return nil, os.ErrClosed
+ 	}
+-	veth := &netlink.Veth{
+-		LinkAttrs:        netlink.LinkAttrs{Name: hostName, MTU: 65535, HardwareAddr: hostAddress},
+-		PeerName:         peerName,
+-		PeerHardwareAddr: peerAddress,
+-		PeerNamespace:    netlink.NsFd(n.handle),
++	// Names follow the pair that is actually created: "auto" is resolved into
++	// netkit or veth before any name is handed out.
++	createPair := func() (netlink.Link, string, string, string, error) {
++		if d.deliveryKind == DeliveryAuto {
++			return createTCDeliveryPairAuto(hostAddress, peerAddress, int(n.handle), deliveryMTU(d.replyMTU))
++		}
++		return createTCDeliveryPairWithNames(d.deliveryKind, hostAddress, peerAddress, int(n.handle), deliveryMTU(d.replyMTU))
+ 	}
+-	udevSettle := beginTCUdevSettle(hostName)
+-	err = netlink.LinkAdd(veth)
++	created, actualKind, hostName, peerName, err := createPair()
+ 	n.access.RUnlock()
+ 	if err != nil {
+-		udevSettle.close()
+-		return nil, E.Cause(err, "create isolated TC veth (CONFIG_VETH and CAP_NET_ADMIN required)")
++		return nil, E.Cause(err, "create isolated TC delivery link (CONFIG_VETH/CONFIG_NETKIT and CAP_NET_ADMIN required)")
+ 	}
+-	owner := &tcDeliveryLink{namespace: n, redirectName: hostName, deliveryName: peerName, redirect: veth, enableIPv6: d.enableIPv6, replyMTU: d.replyMTU}
++	owner := &tcDeliveryLink{namespace: n, redirectName: hostName, deliveryName: peerName,
++		redirect: created, deliveryKind: actualKind, enableIPv6: d.enableIPv6, replyMTU: d.replyMTU}
++	_ = created
+ 	cleanup := func(cause error) (*tcDeliveryLink, error) {
+ 		err := E.Errors(cause, owner.Close())
+ 		if owner.IsClosed() {
+@@ -90,22 +88,17 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+ 		}
+ 		return owner, err
+ 	}
+-	// udev applies link policy and sysctls to the new host end; configuring it
+-	// before udev has finished would be undone moments later.
+-	udevSettle.wait(tcUdevSettleTimeout)
+ 	owner.redirect, err = d.linkByName()(hostName)
+ 	if err != nil {
+-		owner.redirect = veth
++		owner.redirect = created
+ 		return cleanup(E.Cause(err, "find TC eBPF redirect link"))
+ 	}
+ 	if err = netlink.LinkSetUp(owner.redirect); err != nil {
+ 		return cleanup(err)
+ 	}
+-	if err = ensureTCClsact(owner.redirect); err != nil {
+-		return cleanup(err)
+-	}
+-	owner.returnFilter, err = attachTCFilter(owner.redirect, netlink.HANDLE_MIN_INGRESS,
+-		rawTCBackend(d.backend).IsolatedReturnProgramFD(), "sb_tc_return", tcReturnFilterHandle, d.priority)
++	owner.returnLink, owner.returnFilter, err = attachTCDeliveryHook(owner.redirect,
++		rawTCBackend(d.backend).IsolatedReturnProgram(), rawTCBackend(d.backend).IsolatedReturnProgramFD(),
++		"sb_tc_return", tcReturnFilterHandle, d.priority, d.backend)
+ 	if err != nil {
+ 		return cleanup(err)
+ 	}
+@@ -118,18 +111,16 @@ func (d *tcDataPlane) createIsolatedTCDeliveryLink() (*tcDeliveryLink, error) {
+ 		if _, err = owner.configureIsolatedPeer(true); err != nil {
+ 			return err
+ 		}
+-		if err = ensureTCClsact(owner.delivery); err != nil {
+-			return err
+-		}
+-		owner.filter, err = attachTCFilter(owner.delivery, netlink.HANDLE_MIN_INGRESS,
+-			rawTCBackend(d.backend).DeliveryIngressProgramFD(), "sb_tc_deliver", tcDeliveryFilterHandle, d.priority)
++		owner.deliverLink, owner.filter, err = attachTCDeliveryHook(owner.delivery,
++			rawTCBackend(d.backend).DeliveryIngressProgram(), rawTCBackend(d.backend).DeliveryIngressProgramFD(),
++			"sb_tc_deliver", tcDeliveryFilterHandle, d.priority, d.backend)
+ 		return err
+ 	})
+ 	if err != nil {
+ 		return cleanup(E.Cause(err, "configure TC namespace"))
+ 	}
+ 	mac, valid := tcDeliveryMACAddress(owner.delivery)
+-	if !valid {
++	if !valid && owner.deliveryKind != DeliveryNetkitL3 {
+ 		return cleanup(E.New("invalid TC namespace peer MAC"))
+ 	}
+ 	if err = d.backend.SetDeliveryInterface(uint32(owner.redirect.Attrs().Index), mac); err != nil {
+@@ -160,7 +151,7 @@ func (d *tcDeliveryLink) configureIsolatedPeer(repair bool) (bool, error) {
+ 	}
+ 	for _, setting := range []struct {
+ 		path, value string
+-		optional   bool
++		optional    bool
+ 	}{
+ 		{path: tcInterfaceSysctlPath("all", "rp_filter"), value: "0"}, {path: tcInterfaceSysctlPath("default", "rp_filter"), value: "0"},
+ 		{path: tcInterfaceSysctlPath(d.deliveryName, "rp_filter"), value: "0"}, {path: tcInterfaceSysctlPath(d.deliveryName, "accept_local"), value: "1"},
+@@ -231,24 +222,30 @@ func (d *tcDeliveryLink) configureIsolatedPeer(repair bool) (bool, error) {
+ 				}
+ 			}
+ 		}
+-		wantNeighbor := netlink.Neigh{LinkIndex: d.delivery.Attrs().Index, Family: family,
+-			State: netlink.NUD_PERMANENT, IP: gateway, HardwareAddr: d.redirect.Attrs().HardwareAddr}
+-		neighbors, err := netlink.NeighList(wantNeighbor.LinkIndex, family)
+-		if err != nil {
+-			return false, err
+-		}
+-		found = false
+-		for _, current := range neighbors {
+-			if current.IP.Equal(gateway) && current.State == netlink.NUD_PERMANENT && bytes.Equal(current.HardwareAddr, wantNeighbor.HardwareAddr) {
+-				found = true
+-				break
++		// netkit-l3 carries raw IP: there is no Ethernet frame, no ARP and
++		// therefore no neighbor entry to install or check. Comparing a
++		// permanent neighbor against a zero hardware address would report
++		// the link unhealthy on every pass and re-create it each second.
++		if d.deliveryKind != DeliveryNetkitL3 {
++			wantNeighbor := netlink.Neigh{LinkIndex: d.delivery.Attrs().Index, Family: family,
++				State: netlink.NUD_PERMANENT, IP: gateway, HardwareAddr: d.redirect.Attrs().HardwareAddr}
++			neighbors, err := netlink.NeighList(wantNeighbor.LinkIndex, family)
++			if err != nil {
++				return false, err
+ 			}
+-		}
+-		if !found {
+-			healthy = false
+-			if repair {
+-				if err = netlink.NeighSet(&wantNeighbor); err != nil {
+-					return false, err
++			found = false
++			for _, current := range neighbors {
++				if current.IP.Equal(gateway) && current.State == netlink.NUD_PERMANENT && bytes.Equal(current.HardwareAddr, wantNeighbor.HardwareAddr) {
++					found = true
++					break
++				}
++			}
++			if !found {
++				healthy = false
++				if repair {
++					if err = netlink.NeighSet(&wantNeighbor); err != nil {
++						return false, err
++					}
+ 				}
+ 			}
+ 		}
+@@ -316,7 +313,9 @@ func (d *tcDeliveryLink) healthyIsolated(priority uint16) (bool, error) {
+ 	if d.redirect.Attrs().Flags&net.FlagUp == 0 {
+ 		return false, nil
+ 	}
+-	if mac, valid := tcDeliveryMACAddress(d.delivery); !valid || mac != d.deliveryMAC {
++	if mac, valid := tcDeliveryMACAddress(d.delivery); valid && mac != d.deliveryMAC {
++		return false, nil
++	} else if !valid && d.deliveryKind != DeliveryNetkitL3 {
+ 		return false, nil
+ 	}
+ 	live, err = tcFilterAttached(d.redirect, netlink.HANDLE_MIN_INGRESS, "sb_tc_return", tcReturnFilterHandle, priority)
+@@ -344,7 +343,9 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+ 	// Anything that changes the private end's address after creation leaves
+ 	// the backend addressing frames to a MAC the interface no longer accepts.
+ 	mac, valid := tcDeliveryMACAddress(d.delivery)
+-	if !valid {
++	// netkit-l3 carries raw IP: the peer has no hardware address by design, so
++	// a missing MAC is not a reason to rebuild the link every pass.
++	if !valid && d.deliveryKind != DeliveryNetkitL3 {
+ 		return false, true, nil
+ 	}
+ 	if mac != d.deliveryMAC {
+@@ -360,22 +361,12 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+ 		}
+ 		changed = true
+ 	}
+-	repairFilter := func(link netlink.Link, name string, handle uint16, fd int, target **netlink.BpfFilter) error {
+-		attached, err := tcFilterAttached(link, netlink.HANDLE_MIN_INGRESS, name, handle, priority)
+-		if err != nil || attached {
+-			return err
+-		}
+-		if err = ensureTCClsact(link); err != nil {
+-			return err
+-		}
+-		*target, err = attachTCFilter(link, netlink.HANDLE_MIN_INGRESS, fd, name, handle, priority)
+-		if err == nil {
+-			changed = true
+-		}
+-		return err
+-	}
+-	if err = repairFilter(d.redirect, "sb_tc_return", tcReturnFilterHandle, rawTCBackend(backend).IsolatedReturnProgramFD(), &d.returnFilter); err != nil {
++	if repaired, err := repairTCDeliveryHook(&d.returnLink, &d.returnFilter, d.redirect,
++		rawTCBackend(backend).IsolatedReturnProgram(), rawTCBackend(backend).IsolatedReturnProgramFD(),
++		"sb_tc_return", tcReturnFilterHandle, priority, backend); err != nil {
+ 		return changed, false, err
++	} else {
++		changed = changed || repaired
+ 	}
+ 	err = d.namespace.with(func() error {
+ 		healthy, err := d.configureIsolatedPeer(true)
+@@ -383,17 +374,21 @@ func (d *tcDeliveryLink) repairIsolated(backend *commonEBPF.TCBackend, priority
+ 		if err != nil {
+ 			return err
+ 		}
+-		return repairFilter(d.delivery, "sb_tc_deliver", tcDeliveryFilterHandle, rawTCBackend(backend).DeliveryIngressProgramFD(), &d.filter)
++		repaired, err := repairTCDeliveryHook(&d.deliverLink, &d.filter, d.delivery,
++			rawTCBackend(backend).DeliveryIngressProgram(), rawTCBackend(backend).DeliveryIngressProgramFD(),
++			"sb_tc_deliver", tcDeliveryFilterHandle, priority, backend)
++		changed = changed || repaired
++		return err
+ 	})
+ 	return changed, false, err
+ }
+ 
+ func (d *tcDeliveryLink) closeIsolated() error {
+-	if err := detachTCFilterOwned(&d.returnFilter); err != nil {
++	if err := closeTCDeliveryHook(&d.returnLink, &d.returnFilter); err != nil {
+ 		return err
+ 	}
+-	if d.filter != nil {
+-		if err := d.namespace.with(func() error { return detachTCFilterOwned(&d.filter) }); err != nil {
++	if d.deliverLink != nil || d.filter != nil {
++		if err := d.namespace.with(func() error { return closeTCDeliveryHook(&d.deliverLink, &d.filter) }); err != nil {
+ 			return err
+ 		}
+ 	}
+diff --git a/runtime/tc_netkit.go b/runtime/tc_netkit.go
+new file mode 100644
+index 0000000..4dce9d9
+--- /dev/null
++++ b/runtime/tc_netkit.go
+@@ -0,0 +1,195 @@
++//go:build with_ebpf && (linux || android)
++
++package runtime
++
++import (
++	"net"
++
++	"github.com/sagernet/netlink"
++	"github.com/sagernet/netlink/nl"
++	E "github.com/sagernet/sing/common/exceptions"
++	"golang.org/x/sys/unix"
++)
++
++// Delivery link kinds accepted by commonEBPF.TCConfig.Delivery.
++const (
++	DeliveryVeth   = "veth"
++	DeliveryNetkit = "netkit"
++	// DeliveryNetkitL3 is netkit without L2 framing.
++	DeliveryNetkitL3 = "netkit-l3"
++	// DeliveryAuto prefers netkit and falls back to veth when netkit cannot be
++	// created on this kernel.
++	DeliveryAuto = "auto"
++
++	// netkitModeL2 keeps Ethernet framing, which is the default and the only
++	// mode this fork ships. netkitModeL3 drops the MAC/ARP layer but, per the
++	// driver, still carries the same Ethernet-framed skbs (xmit always pulls
++	// ETH_HLEN), so it saves the neighbour table and nothing else.
++	netkitModeL2 = 0
++	netkitModeL3 = 1
++
++	// ifla_netkit enum values (uapi/linux/if_link.h)
++	netkitAttrScrub     = 6
++	netkitAttrPeerScrub = 7
++	netkitScrubNone     = 1
++
++	// tcDeliveryMTUMin is the default delivery link MTU; larger interface MTUs
++	// raise it. A 65535 device only confuses tools like LuCI.
++	tcDeliveryMTUMin = 1500
++)
++
++// createTCDeliveryPair creates the host/peer pair used to cross into the
++// private listener namespace. The returned link is the host end; the caller
++// re-resolves it by name afterwards.
++// deliveryMTU keeps the pair at a normal Ethernet MTU unless the selected
++// interfaces use larger frames.
++func deliveryMTU(replyMTU int) int {
++	if replyMTU < tcDeliveryMTUMin {
++		return tcDeliveryMTUMin
++	}
++	return replyMTU
++}
++
++func createTCDeliveryPair(kind, hostName, peerName string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu int) (netlink.Link, string, error) {
++	switch kind {
++	case "", DeliveryVeth:
++		link, err := addVethPair(hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu)
++		return link, DeliveryVeth, err
++	case DeliveryNetkit:
++		link, err := addNetkitDelivery(hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu, netkitModeL2)
++		return link, DeliveryNetkit, err
++	case DeliveryNetkitL3:
++		// No MAC, no ARP. The pair still carries Ethernet-framed skbs: the
++		// kernel refuses IFLA_ADDRESS in this mode, so both ends keep the
++		// all-zero address and the delivery path writes zero MACs.
++		link, err := addNetkitDelivery(hostName, peerName, nil, nil, namespaceFD, mtu, netkitModeL3)
++		return link, DeliveryNetkitL3, err
++	case DeliveryAuto:
++		return nil, "", E.New("delivery ", DeliveryAuto, " must be resolved before creating the pair")
++	default:
++		return nil, "", E.New("unknown TC eBPF delivery kind: ", kind)
++	}
++}
++
++func addVethPair(hostName, peerName string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu int) (netlink.Link, error) {
++	veth := &netlink.Veth{
++		LinkAttrs:        netlink.LinkAttrs{Name: hostName, MTU: mtu, HardwareAddr: hostAddress},
++		PeerName:         peerName,
++		PeerHardwareAddr: peerAddress,
++	}
++	if namespaceFD >= 0 {
++		veth.PeerNamespace = netlink.NsFd(namespaceFD)
++	}
++	if err := netlink.LinkAdd(veth); err != nil {
++		return nil, E.Cause(err, "create isolated TC veth (CONFIG_VETH and CAP_NET_ADMIN required)")
++	}
++	return veth, nil
++}
++
++func addNetkitDelivery(hostName, peerName string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu, mode int) (netlink.Link, error) {
++	if err := addNetkitPair(hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu, mode); err != nil {
++		return nil, E.Cause(err, "create isolated TC netkit pair (kernel 6.7+, CONFIG_NETKIT and CAP_NET_ADMIN required)")
++	}
++	link, err := netlink.LinkByName(hostName)
++	if err != nil {
++		return nil, E.Cause(err, "find TC eBPF netkit link")
++	}
++	return link, nil
++}
++
++// createTCDeliveryPairWithNames allocates a name pair for one concrete kind and
++// builds it. The names carry the kind that is actually created, so "auto" has
++// to be resolved into a concrete kind first.
++func createTCDeliveryPairWithNames(kind string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu int) (netlink.Link, string, string, string, error) {
++	hostName, peerName, err := nextTCDeliveryNames(kind)
++	if err != nil {
++		return nil, "", "", "", err
++	}
++	link, actual, err := createTCDeliveryPair(kind, hostName, peerName, hostAddress, peerAddress, namespaceFD, mtu)
++	return link, actual, hostName, peerName, err
++}
++
++// createTCDeliveryPairAuto prefers netkit and falls back to veth when the
++// kernel rejects it. Each attempt names the pair after the kind it creates, so
++// the device is never called something other than what is really mounted.
++func createTCDeliveryPairAuto(hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu int) (netlink.Link, string, string, string, error) {
++	link, actual, hostName, peerName, netkitErr := createTCDeliveryPairWithNames(DeliveryNetkit, hostAddress, peerAddress, namespaceFD, mtu)
++	if netkitErr == nil {
++		return link, actual, hostName, peerName, nil
++	}
++	link, actual, hostName, peerName, err := createTCDeliveryPairWithNames(DeliveryVeth, hostAddress, peerAddress, namespaceFD, mtu)
++	if err != nil {
++		return nil, "", "", "", E.Errors(err, netkitErr)
++	}
++	return link, actual, hostName, peerName, nil
++}
++
++// ProbeDelivery creates and immediately removes a delivery pair of the given
++// kind in the current network namespace and reports the kind that was actually
++// created. It is the explicit, opt-in mutation used by `tools ebpf status`.
++func ProbeDelivery(kind string) (string, error) {
++	var (
++		link     netlink.Link
++		actual   string
++		hostName string
++		err      error
++	)
++	if kind == DeliveryAuto {
++		link, actual, hostName, _, err = createTCDeliveryPairAuto(nil, nil, -1, deliveryMTU(0))
++	} else {
++		link, actual, hostName, _, err = createTCDeliveryPairWithNames(kind, nil, nil, -1, deliveryMTU(0))
++	}
++	if err == nil && link != nil {
++		_ = netlink.LinkDel(link)
++	}
++	// Deleting one end removes the pair; make sure nothing is left behind.
++	if hostName != "" {
++		if remaining, lookupErr := netlink.LinkByName(hostName); lookupErr == nil {
++			_ = netlink.LinkDel(remaining)
++		}
++	}
++	if err != nil {
++		return "", err
++	}
++	return actual, nil
++}
++
++// addNetkitPair issues RTM_NEWLINK by hand: sagernet/netlink's LinkAdd has a
++// closed set of link types and netkit's nested attributes are not in it.
++func addNetkitPair(hostName, peerName string, hostAddress, peerAddress net.HardwareAddr, namespaceFD, mtu, mode int) error {
++	request := nl.NewNetlinkRequest(unix.RTM_NEWLINK,
++		unix.NLM_F_REQUEST|unix.NLM_F_ACK|unix.NLM_F_CREATE|unix.NLM_F_EXCL)
++	request.AddData(nl.NewIfInfomsg(unix.AF_UNSPEC))
++	request.AddData(nl.NewRtAttr(unix.IFLA_IFNAME, nl.ZeroTerminated(hostName)))
++	request.AddData(nl.NewRtAttr(unix.IFLA_MTU, nl.Uint32Attr(uint32(mtu))))
++	if len(hostAddress) > 0 {
++		request.AddData(nl.NewRtAttr(unix.IFLA_ADDRESS, hostAddress))
++	}
++
++	linkInfo := nl.NewRtAttr(unix.IFLA_LINKINFO, nil)
++	linkInfo.AddRtAttr(nl.IFLA_INFO_KIND, nl.NonZeroTerminated("netkit"))
++	data := linkInfo.AddRtAttr(nl.IFLA_INFO_DATA, nil)
++	data.AddRtAttr(unix.IFLA_NETKIT_MODE, nl.Uint32Attr(uint32(mode)))
++	// scrub=none keeps skb->mark, which bpf_redirect_peer requires to survive
++	// the netkit boundary. Attribute ids follow the kernel's ifla_netkit enum.
++	data.AddRtAttr(netkitAttrScrub, nl.Uint32Attr(netkitScrubNone))
++
++	peer := data.AddRtAttr(unix.IFLA_NETKIT_PEER_INFO, nil)
++	nl.NewIfInfomsgChild(peer, unix.AF_UNSPEC)
++	peer.AddRtAttr(unix.IFLA_IFNAME, nl.ZeroTerminated(peerName))
++	peer.AddRtAttr(unix.IFLA_MTU, nl.Uint32Attr(uint32(mtu)))
++	if len(peerAddress) > 0 {
++		peer.AddRtAttr(unix.IFLA_ADDRESS, peerAddress)
++	}
++	peer.AddRtAttr(netkitAttrPeerScrub, nl.Uint32Attr(netkitScrubNone))
++	if namespaceFD >= 0 {
++		peer.AddRtAttr(unix.IFLA_NET_NS_FD, nl.Uint32Attr(uint32(namespaceFD)))
++	}
++
++	request.AddData(linkInfo)
++
++	if _, err := request.Execute(unix.NETLINK_ROUTE, 0); err != nil {
++		return err
++	}
++	return nil
++}
+diff --git a/runtime/tc_reconcile.go b/runtime/tc_reconcile.go
+index cf2b554..48a5329 100644
+--- a/runtime/tc_reconcile.go
++++ b/runtime/tc_reconcile.go
+@@ -569,6 +569,7 @@ func (d *tcDataPlane) repairInfrastructure() (bool, error) {
+ 		d.replyMTU, d.delivery.replyMTU = mtu, mtu
+ 	}
+ 	deliveryChanged, replaceDelivery, err := d.delivery.repair(d.backend, d.priority)
++	d.lastRoutingChanged, d.lastDeliveryChanged = routingChanged, deliveryChanged
+ 	if err != nil {
+ 		return routingChanged || deliveryChanged, E.Errors(routingErr, err)
+ 	}
