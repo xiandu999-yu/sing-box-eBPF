@@ -370,6 +370,57 @@ sing-box/src/module/     ← sing-ebpf
 `src/{go.mod,module/}` + `replace => ./module`，且模拟 GOPATH 拷贝后 `go.mod`
 与 `module/` 都在顶层。
 
+### 16.1 两个必须记住的 Makefile 顺序
+
+1. **`include $(INCLUDE_DIR)/package.mk` 不能省**。`BuildPackage`（以及
+   `compile` / `clean` 这些目标）都由它定义；`golang-package.mk` 只提供
+   `GO_PKG` 那套钩子（`Build/Configure` / `Build/Compile`），自己不 include
+   `package.mk`。缺了它的症状是：
+
+   ```
+   make[2]: *** No rule to make target 'compile'.  Stop.
+   ```
+
+   因为 `$(eval $(call BuildPackage,sing-box))` 里 `BuildPackage` 未定义，
+   整个 eval 变成空操作，一个目标都不会生成。
+2. **`define Build/Prepare` 必须写在 `include $(INCLUDE_DIR)/package.mk` 之后**。
+   `package.mk` 末尾是普通赋值 `Build/Prepare=$(call Build/Prepare/Default,)`，
+   会覆盖掉之前定义的版本；放在前面等于没写，最终还是走默认解包。
+
+用假 OpenWrt harness（最小 `package.mk` 模拟 `BuildPackage` 与默认 `Build/Prepare`）
+验证过：`compile` 目标存在、`prepare` 走的是我们的 recipe、产物是
+`src/{go.mod,module/}` + `replace => ./module`。
+
+### 16.2 apk 版本号不能用 `-alpha.13`
+
+`apk mkpkg` 报 `info field 'version' has invalid value`，因为 apk 的版本语法是
+
+```
+number{.number}*[letter]*[_suffix number*]*[-r number]*
+```
+
+用 apk-tools 3.0.10 实测：
+
+| 版本串 | 结果 |
+| --- | --- |
+| `1.15.0-alpha.13` | 解析失败 |
+| `1.15.0_alpha.13` | 解析失败 |
+| `1.15.0_alpha13` | ✅ |
+| `1.15.0-r1` | ✅ |
+
+所以 Makefile 里拆成两个变量：
+
+```make
+PKG_VERSION:=1.15.0_alpha13      # 给 apk/ipk 的包版本
+UPSTREAM_VERSION:=1.15.0-alpha.13 # 给 -X constant.Version，保持 `sing-box version` 与上游一致
+```
+
+`ci/pins.env` 增加 `SING_BOX_PKG_VERSION=1.15.0_alpha13`；`assemble-source.yml`
+写回 Makefile 时同时更新 `PKG_VERSION`（用 PKG 版本）和 `UPSTREAM_VERSION`（用上游版本）。
+tarball 文件名仍用 `SING_BOX_VERSION`，包含横杠没问题。
+
+
+
 
 
 
