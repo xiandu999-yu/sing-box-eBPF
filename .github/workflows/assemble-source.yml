@@ -142,17 +142,21 @@ jobs:
         run: |
           set -eu
           MK=OpenWrt/sing-box/Makefile
+          # apk 的版本语法只认 `1.2.3_alpha1` / `1.2.3-r1` 这类形式，
+          # `1.15.0-alpha.13` 会被拒（ERROR: info field 'version' has invalid value）。
+          # 所以 PKG_VERSION 用下划线形式，面向用户的版本号放在 UPSTREAM_VERSION。
           cur_ver=$(sed -n 's/^PKG_VERSION:=//p' "$MK")
           cur_rel=$(sed -n 's/^PKG_RELEASE:=//p' "$MK")
-          if [ "$cur_ver" = "${SING_BOX_VERSION}" ] && grep -qx "PKG_SOURCE:=${TARBALL}" "$MK"; then
+          if [ "$cur_ver" = "${SING_BOX_PKG_VERSION}" ] && grep -qx "PKG_SOURCE:=${TARBALL}" "$MK"; then
             echo "no change"; exit 0
           fi
-          if [ "$cur_ver" = "${SING_BOX_VERSION}" ]; then
+          if [ "$cur_ver" = "${SING_BOX_PKG_VERSION}" ]; then
             rel=$((cur_rel + 1))
           else
             rel=1
           fi
-          sed -i "s|^PKG_VERSION:=.*|PKG_VERSION:=${SING_BOX_VERSION}|" "$MK"
+          sed -i "s|^PKG_VERSION:=.*|PKG_VERSION:=${SING_BOX_PKG_VERSION}|" "$MK"
+          sed -i "s|^UPSTREAM_VERSION:=.*|UPSTREAM_VERSION:=${SING_BOX_VERSION}|" "$MK"
           sed -i "s|^PKG_RELEASE:=.*|PKG_RELEASE:=${rel}|" "$MK"
           sed -i "s|^PKG_SOURCE:=.*|PKG_SOURCE:=${TARBALL}|" "$MK"
           sed -i "s|^PKG_HASH:=.*|PKG_HASH:=${PKG_HASH}|" "$MK"
