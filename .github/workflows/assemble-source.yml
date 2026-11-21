@@ -49,7 +49,9 @@ jobs:
           }
 
           fetch_at "https://github.com/${SING_BOX_REPOSITORY}" "$OUT/src" "$SING_BOX_COMMIT"
-          fetch_at "https://github.com/${MODULE_REPOSITORY}" "$OUT/module" "$MODULE_COMMIT"
+          # 模块放在 src/ 里面：OpenWrt 的 golang-package 只把 PKG_BUILD_DIR（=src）
+          # 拷进 GOPATH 工作区，兄弟目录 ../module 在那边不存在，相对 replace 会断。
+          fetch_at "https://github.com/${MODULE_REPOSITORY}" "$OUT/src/module" "$MODULE_COMMIT"
 
           # sing-box 补丁（delivery 选项、TCX、clashapi 进程名）
           if ls patches/sing-box/*.patch >/dev/null 2>&1; then
@@ -58,15 +60,15 @@ jobs:
 
           # 模块补丁（pname 旁路、delivery、TCX）
           if ls patches/modules/sing-ebpf/*.patch >/dev/null 2>&1; then
-            git -C "$OUT/module" apply --whitespace=nowarn "$GITHUB_WORKSPACE"/patches/modules/sing-ebpf/*.patch
+            git -C "$OUT/src/module" apply --whitespace=nowarn "$GITHUB_WORKSPACE"/patches/modules/sing-ebpf/*.patch
           fi
 
           # C 改过就要重生成对象：补丁里不带二进制，对象在这里现生成
-          ( cd "$OUT/module" \
+          ( cd "$OUT/src/module" \
               && ANDROID_NDK_HOME="${{ steps.setup-ndk.outputs.ndk-path }}" make generate )
 
           ( cd "$OUT/src" \
-              && go mod edit -replace "${MODULE_PATH}=../module" \
+              && go mod edit -replace "${MODULE_PATH}=./module" \
               && go mod tidy )
 
           # 用源码 commit 的时间做可复现时间戳：版本号不一定是 YYYY-MM-DD 形式
