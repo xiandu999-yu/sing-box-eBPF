@@ -17,13 +17,13 @@ PKG_NAME:=sing-box
 # apk 的版本语法只认 `1.2.3_alpha1`、`1.2.3-r1`；`1.15.0-alpha.13` 会被
 # `apk mkpkg` 拒绝（info field 'version' has invalid value）。
 # 所以包版本用下划线形式，上游版本号单独放 UPSTREAM_VERSION 给 -X constant.Version。
-PKG_VERSION:=1.15.0_alpha13
-UPSTREAM_VERSION:=1.15.0-alpha.13
-PKG_RELEASE:=2
+PKG_VERSION:=1.15.0_alpha15
+UPSTREAM_VERSION:=1.15.0-alpha.15
+PKG_RELEASE:=1
 
-PKG_SOURCE:=sing-box-src-1.15.0-alpha.13-6f6a73c6a729.tar.gz
+PKG_SOURCE:=sing-box-src-1.15.0-alpha.15-PLACEHOLDER.tar.gz
 PKG_SOURCE_URL:=https://github.com/xiandu999-yu/sing-box-eBPF/releases/download/sing-box-src/
-PKG_HASH:=6f6a73c6a7295cfa480ccba92e790fcd00256e2e868ce319f59b6b7a7d47dfa5
+PKG_HASH:=PLACEHOLDER
 
 PKG_LICENSE:=GPL-3.0-or-later
 PKG_LICENSE_FILES:=LICENSE

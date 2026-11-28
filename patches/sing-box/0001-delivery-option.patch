@@ -1,5 +1,5 @@
 diff --git a/adapter/ebpf.go b/adapter/ebpf.go
-index 7029ef38..5a2582cb 100644
+index 59c7c4c1..64756196 100644
 --- a/adapter/ebpf.go
 +++ b/adapter/ebpf.go
 @@ -91,6 +91,7 @@ type EBPFRuntimeDiagnostics struct {
@@ -11,7 +11,7 @@ index 7029ef38..5a2582cb 100644
  	TCNetworkNamespace              string
  	TCDeliveryInterfaceIndex        int
 diff --git a/box.go b/box.go
-index afe9afe7..2360a4ee 100644
+index b561053f..9a3967c2 100644
 --- a/box.go
 +++ b/box.go
 @@ -114,6 +114,12 @@ func New(options Options) (instance *Box, err error) {
@@ -227,7 +227,7 @@ index bf144ad4..48a55ebc 100644
  
  type CacheFileOptions struct {
 diff --git a/protocol/ebpf/diagnostics_api.go b/protocol/ebpf/diagnostics_api.go
-index 5c5f099f..19657751 100644
+index c15506d2..6b15b2ca 100644
 --- a/protocol/ebpf/diagnostics_api.go
 +++ b/protocol/ebpf/diagnostics_api.go
 @@ -76,6 +76,7 @@ func diagnosticsForAPI(diagnostics EBPFDiagnostics) adapter.EBPFRuntimeDiagnosti
@@ -239,10 +239,10 @@ index 5c5f099f..19657751 100644
  		TCNetworkNamespace:              diagnostics.TCNetworkNamespace,
  		TCDeliveryInterfaceIndex:        diagnostics.TCDeliveryInterfaceIndex,
 diff --git a/protocol/ebpf/diagnostics_model.go b/protocol/ebpf/diagnostics_model.go
-index 52304db4..cedeb7e5 100644
+index cf6a2ad3..5ccb126c 100644
 --- a/protocol/ebpf/diagnostics_model.go
 +++ b/protocol/ebpf/diagnostics_model.go
-@@ -158,6 +158,7 @@ type EBPFDiagnostics struct {
+@@ -156,6 +156,7 @@ type EBPFDiagnostics struct {
  	TCBackendMode                   string     `json:"tc_backend_mode,omitempty"`
  	TCListenerLookupMode            string     `json:"tc_listener_lookup_mode,omitempty"`
  	TCAttachmentMode                string     `json:"tc_attachment_mode,omitempty"`
@@ -251,10 +251,10 @@ index 52304db4..cedeb7e5 100644
  	TCNetworkNamespace              string     `json:"tc_network_namespace,omitempty"`
  	TCDeliveryInterfaceIndex        int        `json:"tc_delivery_interface_index,omitempty"`
 diff --git a/protocol/ebpf/diagnostics_render.go b/protocol/ebpf/diagnostics_render.go
-index 19aaf4b7..911a3d4b 100644
+index 2c6e7d7d..12baca98 100644
 --- a/protocol/ebpf/diagnostics_render.go
 +++ b/protocol/ebpf/diagnostics_render.go
-@@ -176,6 +176,9 @@ func (i *Inbound) logStartupSummaryLocked() {
+@@ -182,6 +182,9 @@ func (i *Inbound) logStartupSummaryLocked() {
  		}
  	}
  
@@ -264,7 +264,7 @@ index 19aaf4b7..911a3d4b 100644
  	i.logger.Info("eBPF ", ebpfStructuredEvent("inbound_start", map[string]any{
  		"state":              diagnostics.State,
  		"configured_paths":   paths,
-@@ -183,5 +186,8 @@ func (i *Inbound) logStartupSummaryLocked() {
+@@ -189,5 +192,8 @@ func (i *Inbound) logStartupSummaryLocked() {
  		"waiting_paths":      waiting,
  		"waiting_interfaces": waitingInterfaces,
  		"fakeip_icmp":        fakeIPICMPSummary,
@@ -274,7 +274,7 @@ index 19aaf4b7..911a3d4b 100644
  	}))
  }
 diff --git a/protocol/ebpf/diagnostics_snapshot.go b/protocol/ebpf/diagnostics_snapshot.go
-index 432d65d7..94f72e34 100644
+index f41994ca..0a147af9 100644
 --- a/protocol/ebpf/diagnostics_snapshot.go
 +++ b/protocol/ebpf/diagnostics_snapshot.go
 @@ -111,6 +111,7 @@ func (i *Inbound) diagnosticsLocked() EBPFDiagnostics {
@@ -286,7 +286,7 @@ index 432d65d7..94f72e34 100644
  		diagnostics.TCRoutingTable = tc.NetworkInfo.RoutingTable
  		diagnostics.TCRoutingPriority = tc.NetworkInfo.RoutingPriority
 diff --git a/protocol/ebpf/inbound.go b/protocol/ebpf/inbound.go
-index 61841b4a..0e825e70 100644
+index c055df56..d5639218 100644
 --- a/protocol/ebpf/inbound.go
 +++ b/protocol/ebpf/inbound.go
 @@ -30,6 +30,11 @@ const (
@@ -309,7 +309,7 @@ index 61841b4a..0e825e70 100644
  	localRoutes            *commonEBPF.LocalRouteSet
  	selfBypass             *commonEBPF.SelfBypass
  	processTracker         processTrackerOwner
-@@ -167,10 +173,14 @@ type Inbound struct {
+@@ -171,10 +177,14 @@ type Inbound struct {
  	sharedIPv6                bool
  	sharedBypassPrivate       bool
  	localBypassPort           []portRange
@@ -324,7 +324,7 @@ index 61841b4a..0e825e70 100644
  	fakeIPIPv4Prefix          netip.Prefix
  	fakeIPIPv6Prefix          netip.Prefix
  	fakeIPICMPReply           bool
-@@ -305,6 +315,24 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -309,6 +319,24 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  			return nil, E.New("eBPF self-bypass sockets were not prepared")
  		}
  	}
@@ -349,7 +349,7 @@ index 61841b4a..0e825e70 100644
  	inbound := &Inbound{
  		Adapter:        inbound.NewAdapter(C.TypeEBPF, tag),
  		ctx:            ctx,
-@@ -333,10 +361,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
+@@ -337,10 +365,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
  		sharedIPv6:          sharedEnabled && enabledByDefault(options.Shared.IPv6),
  		sharedBypassPrivate: options.Shared.BypassPrivateAddress == nil || *options.Shared.BypassPrivateAddress,
  		localBypassPort:     localBypassPort,
@@ -364,7 +364,7 @@ index 61841b4a..0e825e70 100644
  		sharedIncludeMAC:    sharedIncludeMAC,
  		sharedExcludeMAC:    sharedExcludeMAC,
  		localPolicy: localUIDPolicy{
-@@ -432,3 +464,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
+@@ -436,3 +468,54 @@ func warnBypassPortConflicts(logger log.ContextLogger, scope, dnsMode string, po
  		break
  	}
  }
@@ -505,7 +505,7 @@ index 7f06bc5d..0eb8cf2e 100644
  	if err != nil {
  		return err
 diff --git a/protocol/ebpf/lifecycle_start.go b/protocol/ebpf/lifecycle_start.go
-index 8008ce20..8ffc4bea 100644
+index 256eb87f..7842ed88 100644
 --- a/protocol/ebpf/lifecycle_start.go
 +++ b/protocol/ebpf/lifecycle_start.go
 @@ -122,6 +122,13 @@ func (i *Inbound) startInbound() error {
@@ -532,7 +532,7 @@ index 8008ce20..8ffc4bea 100644
  		EnableLocal:       localEnabled,
  		EnableShared:      sharedEnabled,
  		EnableIPv4:        true,
-@@ -571,3 +581,25 @@ func (i *Inbound) claimSelfBypass() error {
+@@ -572,3 +582,25 @@ func (i *Inbound) claimSelfBypass() error {
  	}
  	return nil
  }
@@ -559,7 +559,7 @@ index 8008ce20..8ffc4bea 100644
 +	return err
 +}
 diff --git a/protocol/ebpf/tc_connection.go b/protocol/ebpf/tc_connection.go
-index abbf9167..5f150459 100644
+index 39c3eff4..e4417ab1 100644
 --- a/protocol/ebpf/tc_connection.go
 +++ b/protocol/ebpf/tc_connection.go
 @@ -8,6 +8,7 @@ import (

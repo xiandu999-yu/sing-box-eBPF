@@ -273,10 +273,10 @@ index 71a112e..a7cd094 100644
  
  func DefaultCgroupMapCapacity() CgroupMapCapacity {
 diff --git a/internal/core/cgroup_backend.go b/internal/core/cgroup_backend.go
-index 2726f3f..c80b970 100644
+index 7d0ca50..46fad29 100644
 --- a/internal/core/cgroup_backend.go
 +++ b/internal/core/cgroup_backend.go
-@@ -108,6 +108,8 @@ type cgroupRuntime struct {
+@@ -109,6 +109,8 @@ type cgroupRuntime struct {
  }
  
  type CgroupBackend struct {
@@ -285,7 +285,7 @@ index 2726f3f..c80b970 100644
  	access                 sync.RWMutex
  	health                 backendHealth
  	recovery               cgroupRecoveryStore
-@@ -171,14 +173,16 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -172,14 +174,16 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  			return nil, err
  		}
  	}
@@ -310,7 +310,7 @@ index 2726f3f..c80b970 100644
  	}
  	udpTimeoutSeconds := uint32(0)
  	if config.EnableUDP {
-@@ -241,12 +245,17 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -242,12 +246,17 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  	socketReleaseSupported := false
  	skStorage := false
  	coarseTimeSupported := false
@@ -331,7 +331,7 @@ index 2726f3f..c80b970 100644
  		}
  	}
  	if socketReleaseSupported &&
-@@ -293,6 +302,11 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -294,6 +303,11 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  		}
  		return nil, err
  	}
@@ -343,7 +343,7 @@ index 2726f3f..c80b970 100644
  	backend := &CgroupBackend{
  		mapCapacity:         mapCapacity,
  		runtime:             runtimeState,
-@@ -317,6 +331,8 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
+@@ -318,6 +332,8 @@ func PrepareCgroup(config CgroupConfig) (*CgroupBackend, error) {
  		selfBypassTGID:      config.selfBypassTGID,
  		bypassIPv4CIDR:      slices.Clone(policy.localInitialBypass.ipv4),
  		bypassIPv6CIDR:      slices.Clone(policy.localInitialBypass.ipv6),
@@ -353,16 +353,16 @@ index 2726f3f..c80b970 100644
  	runtimeState.direct_tgid = config.selfBypassTGID != 0
  	if err = populateCompiledPolicyMaps(policyMapTargets{
 diff --git a/internal/core/cgroup_maps.go b/internal/core/cgroup_maps.go
-index 752ce61..2089648 100644
+index 89a24ce..16a926e 100644
 --- a/internal/core/cgroup_maps.go
 +++ b/internal/core/cgroup_maps.go
 @@ -81,6 +81,7 @@ func prepareCgroupMaps(runtimeState *cgroupRuntime, capacity CgroupMapCapacity,
- 		"cgroup_uid_policy":        {name: "sb_cg_uid", mapType: CiliumEBPF.LPMTrie, maxEntries: uidCapacity, flags: bpfFlagNoPrealloc},
- 		"cgroup_bypass_ipv4":       {name: "sb_cg_bypass4", mapType: CiliumEBPF.LPMTrie, maxEntries: maxDestinationCIDRPolicyEntries, flags: bpfFlagNoPrealloc},
- 		"cgroup_bypass_ipv6":       {name: "sb_cg_bypass6", mapType: CiliumEBPF.LPMTrie, maxEntries: maxDestinationCIDRPolicyEntries, flags: bpfFlagNoPrealloc},
-+		"cgroup_process_bypass":    {name: "sb_cg_pname", mapType: CiliumEBPF.LPMTrie, maxEntries: maxProcessBypassEntries, flags: bpfFlagNoPrealloc},
- 		"cgroup_host_ipv4":         {name: "sb_cg_host4", mapType: CiliumEBPF.Hash, maxEntries: maxHostAddressPolicyEntries, flags: bpfFlagNoPrealloc},
- 		"cgroup_host_ipv6":         {name: "sb_cg_host6", mapType: CiliumEBPF.Hash, maxEntries: maxHostAddressPolicyEntries, flags: bpfFlagNoPrealloc},
+ 		"cgroup_uid_policy":        configuredPolicyMap(mapSpecOverride{name: "sb_cg_uid", mapType: CiliumEBPF.LPMTrie, maxEntries: uidCapacity, flags: bpfFlagNoPrealloc}),
+ 		"cgroup_bypass_ipv4":       configuredPolicyMap(mapSpecOverride{name: "sb_cg_bypass4", mapType: CiliumEBPF.LPMTrie, maxEntries: maxDestinationCIDRPolicyEntries, flags: bpfFlagNoPrealloc}),
+ 		"cgroup_bypass_ipv6":       configuredPolicyMap(mapSpecOverride{name: "sb_cg_bypass6", mapType: CiliumEBPF.LPMTrie, maxEntries: maxDestinationCIDRPolicyEntries, flags: bpfFlagNoPrealloc}),
++		"cgroup_process_bypass":    configuredPolicyMap(mapSpecOverride{name: "sb_cg_pname", mapType: CiliumEBPF.LPMTrie, maxEntries: maxProcessBypassEntries, flags: bpfFlagNoPrealloc}),
+ 		"cgroup_host_ipv4":         configuredPolicyMap(mapSpecOverride{name: "sb_cg_host4", mapType: CiliumEBPF.Hash, maxEntries: maxHostAddressPolicyEntries, flags: bpfFlagNoPrealloc}),
+ 		"cgroup_host_ipv6":         configuredPolicyMap(mapSpecOverride{name: "sb_cg_host6", mapType: CiliumEBPF.Hash, maxEntries: maxHostAddressPolicyEntries, flags: bpfFlagNoPrealloc}),
  		"cgroup_udp_release_watch": {
 diff --git a/internal/core/cgroup_program.go b/internal/core/cgroup_program.go
 index f9f320a..1ad9566 100644
@@ -659,7 +659,7 @@ index 0000000..80d573b
 +	return key, nil
 +}
 diff --git a/internal/core/tc.go b/internal/core/tc.go
-index 1fadbef..711573a 100644
+index 78c66d6..9558273 100644
 --- a/internal/core/tc.go
 +++ b/internal/core/tc.go
 @@ -95,15 +95,22 @@ const (
@@ -694,7 +694,7 @@ index 1fadbef..711573a 100644
  	Policy             CompiledPolicy
  	RoutingMark        uint32
  	SelfBypassMap      *CiliumEBPF.Map
-@@ -175,6 +182,9 @@ type TCBackend struct {
+@@ -176,6 +183,9 @@ type TCBackend struct {
  	tcpListenerMap      bool
  	programsExposed     bool
  	control             tcControl
@@ -704,17 +704,17 @@ index 1fadbef..711573a 100644
  	controlMapFD        int
  	flowStore           tcFlowStore
  	selfMapExternal     bool
-@@ -334,6 +344,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
+@@ -347,6 +357,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
  		controlValue.Flags |= tcFlagSharedBypassIPv6
  	}
  	backend := &TCBackend{
 +		delivery:       config.Delivery,
 +		tcxPosition:    config.TCXPosition,
 +		tcxPriority:    config.TCXPriority,
- 		runtime:        &tcRuntime{maps: maps, programs: loadedPrograms},
+ 		runtime:        &tcRuntime{maps: maps, mapMetadata: mapMetadataFromOverrides(mapOverrides), programs: loadedPrograms},
  		tcpListenerMap: config.EnableTCP && !legacyTCP,
  		control:        controlValue,
-@@ -1032,6 +1045,14 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
+@@ -1045,6 +1058,14 @@ func (b *TCBackend) SharedIngressProgram(framing TCLinkFraming) *CiliumEBPF.Prog
  func (b *TCBackend) DeliveryIngressProgramFD() int { return b.programFD(tcProgramDeliveryIngress) }
  func (b *TCBackend) IsolatedReturnProgramFD() int  { return b.programFD(tcProgramIsolatedReturn) }
  
@@ -834,7 +834,7 @@ index 503dc7b..cb86aa3 100644
 +
  #endif
 diff --git a/native/cgroup.bpf.c b/native/cgroup.bpf.c
-index ceec1c4..f4ab808 100644
+index b24cac1..a69d50a 100644
 --- a/native/cgroup.bpf.c
 +++ b/native/cgroup.bpf.c
 @@ -80,6 +80,7 @@ MAP(cgroup_uid_policy, struct sb_ebpf_uid_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE);
@@ -853,7 +853,7 @@ index ceec1c4..f4ab808 100644
  static __u64 (*ktime_get_ns)(void) = (void *)BPF_FUNC_ktime_get_ns;
  static long (*ringbuf_output)(void *ringbuf, void *data, __u64 size, __u64 flags) =
      (void *)BPF_FUNC_ringbuf_output;
-@@ -173,6 +175,27 @@ INLINE bool is_direct_self_bypassed(const struct sb_ebpf_cgroup_control *config)
+@@ -182,6 +184,27 @@ INLINE bool is_direct_self_bypassed(const struct sb_ebpf_cgroup_control *config)
  #endif
  }
  
@@ -881,7 +881,7 @@ index ceec1c4..f4ab808 100644
  INLINE bool uid_bypassed(const struct sb_ebpf_cgroup_control *config) {
      if ((config->flags & SB_EBPF_CGROUP_FLAG_UID_POLICY) == 0U) return false;
      __u32 uid = network_order32((__u32)get_current_uid_gid());
-@@ -710,6 +733,13 @@ INLINE int handle_v4(
+@@ -719,6 +742,13 @@ INLINE int handle_v4(
      const struct sb_ebpf_cgroup_control *config = control();
      if (config == 0) return 1;
      if (is_direct_self_bypassed(config)) return 1;
@@ -895,7 +895,7 @@ index ceec1c4..f4ab808 100644
      __u8 protocol;
      if (protocol_mode == CGROUP_PROTOCOL_TCP_ONLY) {
          if (!connect_hook || ctx->protocol != TCP_VALUE) return 1;
-@@ -796,6 +826,12 @@ INLINE int handle_v6(
+@@ -805,6 +835,12 @@ INLINE int handle_v6(
      const struct sb_ebpf_cgroup_control *config = control();
      if (config == 0) return 1;
      if (is_direct_self_bypassed(config)) return 1;
@@ -908,7 +908,7 @@ index ceec1c4..f4ab808 100644
      __u32 address[4];
      __builtin_memcpy(address, ctx->user_ip6, sizeof(address));
      __u8 protocol;
-@@ -1166,4 +1202,21 @@ INLINE int release_socket_notify(struct bpf_sock *ctx) {
+@@ -1178,4 +1214,21 @@ INLINE int release_socket_notify(struct bpf_sock *ctx) {
  SEC("cgroup/sock_release_cookie") int sb_ebpf_rel_cookie(struct bpf_sock *ctx) { return release_socket(ctx); }
  SEC("cgroup/sock_release_notify") int sb_ebpf_rel_notify(struct bpf_sock *ctx) { return release_socket_notify(ctx); }
  

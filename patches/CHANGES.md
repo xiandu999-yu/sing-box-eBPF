@@ -14,22 +14,42 @@
 
 ---
 
-## 0. 基准：`e74cfa22` / 模块 `d2983dce`（2026-11-13）
+## 0. 基准：`b828824f` / 模块 `1b82a411`（2026-11-28，版本 `1.15.0-alpha.15`）
 
 `ci/pins.env` 现在是：
 
 | 固定点 | commit | 内容 |
 | --- | --- | --- |
-| `SING_BOX_COMMIT` | `e74cfa22` `fix(ebpf): roll back self-bypass on box creation failure` | 相对 `6dc5542f` 是 3 个 commit、17 个文件：box 创建失败时回滚 self-bypass、跨 box 的重试清理、新增 `internal/ebpfcleanup` 注册表、`box_ebpf_cleanup*.go`、`route/network_ebpf.go`。补丁只有 1 处冲突（`lifecycle_start.go` 末尾） |
-| `MODULE_COMMIT` | `d2983dce` `test socket-local storage lifetime` | 不变。e74cfa22 的 `go.mod` 写的是更早的 `02db5a5`，`d2983dce` 是它的后继，API 只多不少 |
+| `SING_BOX_COMMIT` | `b828824f` `docs(ebpf): document inbound and build workflow` | 相对 `e74cfa22` 是上游一次大合并：Go 1.26/1.27、quic-go 0.66、tailscale 1.106.1、MASQUE、HTTP 代理重写，以及 `feat(ebpf): add inbound data plane`。版本从 `alpha.13` 升到 **`alpha.15`**。我们的 17 文件补丁零冲突 |
+| `MODULE_COMMIT` | `1b82a411` | 41 个文件：cilium/ebpf 提到 **`v0.22.1-0.20261119135504-862b60f0fc93`**（含 7.3 verifier 结构化日志支持），Go 1.26.11。2 处冲突（`cgroup_maps.go`、`tc.go`） |
 
-**这跳唯一的冲突**：`protocol/ebpf/lifecycle_start.go` 末尾，上游加了 `claimSelfBypass()`，
-我们的 `startProcessMarkers()` / `closeProcessMarkers()` 也在同一位置，两边都保留。
+**7.3 兼容**：cilium `862b60f`（2026-11-19）已包含 `64d4fa2` “parse and split 7.3 verifier
+errors”，Linux 7.3 的 `Reason:/Suggestion:` 结构化报告能被正确拆分；旧 pin（`60e8107`，
+2026-09-10）没有这段，只影响报错文本解析，不影响加载。
+
+**两处模块冲突**：
+
+- `internal/core/cgroup_maps.go`：上游给每个 map override 加了
+  `runtimeCacheMap` / `criticalRuntimeMap` / `configuredPolicyMap` 包装；我们的
+  `cgroup_process_bypass`（pname LPM 表）改用 `configuredPolicyMap(...)` 风格插回去；
+- `internal/core/tc.go`：上游 `tcRuntime` 多了 `mapMetadata`，我们在同一字面量里补回
+  `delivery` / `tcxPosition` / `tcxPriority`。
+
+**Go 1.27 的一个坑**：`badlinkname` 标签在 `goexperiment.jsonv2`（Go 1.27 默认开启）下会
+引用 `encoding/json/v2.lookupArshalerCache`，**必须**带 `-checklinkname=0` 才能链接通过：
+
+```
+link: github.com/sagernet/sing-box/service/oomkiller: invalid reference to encoding/json/v2.lookupArshalerCache
+```
+
+`OpenWrt/sing-box/Makefile` 的 `GO_PKG_LDFLAGS` 和 `build.yml` 的 `$(cat release/LDFLAGS)`
+都已经带了这个开关，只有手写 `go build` 时容易漏。
 
 更早的几跳记录：
 
 | 固定点 | 内容 |
 | --- | --- |
+| `e74cfa22` / `d2983dce` | box 创建失败回滚 self-bypass、跨 box 重试清理；`lifecycle_start.go` 末尾一处冲突（`claimSelfBypass` 与我们的 marker 函数） |
 | `6dc5542f` | 9 个 commit：socket-local 自旁路后端、direct TGID 自旁路、生命周期拆分与诊断。三处结构体冲突已按上游新字段重排；**上游自己实现了「自身早退」**，我们原来的 `owner_tgid` / `is_owner_process()` 已删掉改用 `self_bypass_tgid`（模块补丁 1852 → 1783 行、25 → 24 文件） |
 | `91bc15bf` | 17 个 commit，self-bypass 先试 socket-mark 又回退、UDP generation 隔离、策略合并、diagnostics schema；模块 `CgroupConfig` 一处手工合并 |
 | `ed2bdc8` | 把 eBPF inbound 拆成 `inboundResources` / `inboundWorkers` / `inboundDiagnostics`，补丁按新结构重做 |
@@ -44,6 +64,8 @@
 | `CgroupConfig` 新增 `selfBypass *SelfBypass` / `selfBypassTGID` | 与我们的 `BypassProcess` / `MarkerOnly` 落在同一字段块，两边都保留 |
 | 上游 `self_bypass_tgid` + `is_direct_self_bypassed()` 取代我们的 `owner_tgid` + `is_owner_process()` | 删掉我们那套，pname 判定接在上游早退之后 |
 | 上游 `claimSelfBypass()`（box 生命周期接管） | 与我们的 marker 启停函数并列，互不影响 |
+| 上游 map override 包了 `runtimeCacheMap` 等 | pname 表用 `configuredPolicyMap` 风格补回 |
+| 上游 `tcRuntime` 多了 `mapMetadata` | 同一字面量里保留，并把 `delivery` / `tcx_*` 加回去 |
 
 `assemble-source` 里加了 **Verify patch anchors** 一步：补丁是行级 diff，上游再把函数挪走时
 照样能"应用成功"，所以逐个断言关键改动还在真正生效的代码上（尤其是缝在
@@ -51,12 +73,12 @@
 
 `SelfBypass.RegisterSocket` / `UnregisterSocket` / `FallbackReason` / `RemoveAssignmentIfMatch` /
 `LastRepair` / `DeliveryKind` 和按次统计的 UDP admission 计数（token / peer / recovery）在
-`d2983dce` 里都还在，补丁不需要额外接口。
+`1b82a411` 里都还在，补丁不需要额外接口。
 
-组装结果已实测编译通过：`e74cfa22` + 两份补丁 + `go mod replace ./module`，
-`-tags with_ebpf,with_clash_api,with_quic,with_utls,with_gvisor,with_wireguard,badlinkname`；
-`sing-box check` 用带 `bypass_process` / `netkit-l3` / `socket_assign` 的配置跑通，
-非法 `delivery` 与非法 `tcx_position` 仍然被拒。
+组装结果已实测编译通过：`b828824f` + 两份补丁 + `go mod replace ./module`，
+`-tags with_ebpf,with_clash_api,with_quic,with_utls,with_gvisor,with_wireguard,badlinkname`，
+`-ldflags "-checklinkname=0 …"`；`sing-box check` 用带 `bypass_process` / `netkit-l3` /
+`socket_assign` 的配置跑通，非法 `delivery` 与非法 `tcx_position` 仍然被拒。
 
 ### tarball 布局（2026-11-21 起）
 
