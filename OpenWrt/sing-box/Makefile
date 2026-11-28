@@ -19,11 +19,11 @@ PKG_NAME:=sing-box
 # 所以包版本用下划线形式，上游版本号单独放 UPSTREAM_VERSION 给 -X constant.Version。
 PKG_VERSION:=1.15.0_alpha15
 UPSTREAM_VERSION:=1.15.0-alpha.15
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
-PKG_SOURCE:=sing-box-src-1.15.0-alpha.15-PLACEHOLDER.tar.gz
+PKG_SOURCE:=sing-box-src-1.15.0-alpha.15-e0b0661cda9c.tar.gz
 PKG_SOURCE_URL:=https://github.com/xiandu999-yu/sing-box-eBPF/releases/download/sing-box-src/
-PKG_HASH:=PLACEHOLDER
+PKG_HASH:=e0b0661cda9c8949017de2ce12a83dc8be736ca60e1304b1901832aada026f0e
 
 PKG_LICENSE:=GPL-3.0-or-later
 PKG_LICENSE_FILES:=LICENSE
